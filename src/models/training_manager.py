@@ -130,7 +130,12 @@ class TrainingManager:
         
         for batch in self.train_loader:
             # 移動數據到設備
-            inputs = batch['features'].to(self.device)
+            if isinstance(batch['features'], dict):
+                # 處理特徵字典：將每個特徵張量移動到設備
+                inputs = {key: tensor.to(self.device) for key, tensor in batch['features'].items()}
+            else:
+                # 處理單一張量
+                inputs = batch['features'].to(self.device)
             labels = batch['labels'].to(self.device)
             
             # 前向傳播
@@ -174,7 +179,13 @@ class TrainingManager:
         
         with torch.no_grad():
             for batch in self.val_loader:
-                inputs = batch['features'].to(self.device)
+                # 移動數據到設備
+                if isinstance(batch['features'], dict):
+                    # 處理特徵字典：將每個特徵張量移動到設備
+                    inputs = {key: tensor.to(self.device) for key, tensor in batch['features'].items()}
+                else:
+                    # 處理單一張量
+                    inputs = batch['features'].to(self.device)
                 labels = batch['labels'].to(self.device)
                 
                 outputs = self.model(inputs)

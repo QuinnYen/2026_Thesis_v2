@@ -46,13 +46,56 @@ class BaseClassifier(nn.Module, ABC):
         # 通用Dropout層
         self.dropout = nn.Dropout(dropout_rate)
         
+    def _process_input_features(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
+        """
+        處理輸入特徵，將字典格式轉換為張量
+        
+        Args:
+            x: 輸入特徵或特徵字典
+            
+        Returns:
+            處理後的張量
+        """
+        if isinstance(x, dict):
+            # 將所有特徵拼接成單一張量
+            feature_tensors = []
+            for key in sorted(x.keys()):  # 保持順序一致性
+                feature = x[key]
+                # 確保特徵是張量
+                if isinstance(feature, torch.Tensor):
+                    # 如果是多維張量，展平除了批次維度
+                    if feature.dim() > 2:
+                        feature = feature.view(feature.size(0), -1)
+                    feature_tensors.append(feature)
+                elif isinstance(feature, np.ndarray):
+                    feature_tensor = torch.from_numpy(feature).float()
+                    if feature_tensor.dim() > 2:
+                        feature_tensor = feature_tensor.view(feature_tensor.size(0), -1)
+                    feature_tensors.append(feature_tensor)
+                elif isinstance(feature, dict):
+                    # 如果特徵本身是字典，遞歸處理或跳過
+                    print(f"Warning: Skipping nested dict feature '{key}': {type(feature)}")
+                    continue
+                else:
+                    print(f"Warning: Skipping unsupported feature type '{key}': {type(feature)}")
+                    continue
+            
+            if not feature_tensors:
+                # 如果沒有有效的特徵張量，創建一個零張量
+                batch_size = 1  # 默認批次大小
+                return torch.zeros(batch_size, 1)
+            else:
+                return torch.cat(feature_tensors, dim=-1)
+        else:
+            return x
+        
     @abstractmethod
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
         前向傳播抽象方法
         
         Args:
-            x: 輸入特徵
+            x: 輸入特徵或特徵字典
             
         Returns:
             分類結果字典
@@ -162,16 +205,19 @@ class MLPClassifier(BaseClassifier):
         }
         return activations.get(activation, nn.ReLU())
     
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
         前向傳播
         
         Args:
-            x: 輸入特徵 [batch_size, input_dim]
+            x: 輸入特徵 [batch_size, input_dim] 或特徵字典
             
         Returns:
             分類結果字典
         """
+        # 處理輸入特徵
+        x = self._process_input_features(x)
+        
         # 提取特徵
         features = self.feature_extractor(x)
         
@@ -247,16 +293,19 @@ class AttentionEnhancedClassifier(BaseClassifier):
         # 位置編碼（可選）
         self.positional_encoding = nn.Parameter(torch.randn(1, 1, hidden_dim))
     
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
         前向傳播
         
         Args:
-            x: 輸入特徵 [batch_size, input_dim] 或 [batch_size, seq_len, input_dim]
+            x: 輸入特徵 [batch_size, input_dim] 或 [batch_size, seq_len, input_dim] 或特徵字典
             
         Returns:
             分類結果字典
         """
+        # 處理輸入特徵
+        x = self._process_input_features(x)
+        
         # 如果是2D輸入，擴展為3D
         if x.dim() == 2:
             x = x.unsqueeze(1)  # [batch_size, 1, input_dim]
@@ -353,16 +402,19 @@ class HierarchicalClassifier(BaseClassifier):
             nn.Linear(hidden_dim, fine_classes)
         )
     
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
         前向傳播
         
         Args:
-            x: 輸入特徵 [batch_size, input_dim]
+            x: 輸入特徵 [batch_size, input_dim] 或特徵字典
             
         Returns:
             分類結果字典
         """
+        # 處理輸入特徵
+        x = self._process_input_features(x)
+        
         # 特徵提取
         features = self.feature_extractor(x)
         
@@ -459,18 +511,21 @@ class CrossDomainClassifier(BaseClassifier):
         self.lambda_grl = nn.Parameter(torch.tensor(1.0))
     
     def forward(self, 
-                x: torch.Tensor, 
+                x: Union[torch.Tensor, Dict[str, torch.Tensor]], 
                 domain_ids: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """
         前向傳播
         
         Args:
-            x: 輸入特徵 [batch_size, input_dim]
+            x: 輸入特徵 [batch_size, input_dim] 或特徵字典
             domain_ids: 領域ID [batch_size] （可選）
             
         Returns:
             分類結果字典
         """
+        # 處理輸入特徵
+        x = self._process_input_features(x)
+        
         batch_size = x.size(0)
         
         # 共享特徵提取
@@ -591,12 +646,12 @@ class EnsembleClassifier(nn.Module):
                 nn.Linear(num_classes * 2, num_classes)
             )
     
-    def forward(self, x: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], **kwargs) -> Dict[str, torch.Tensor]:
         """
         前向傳播
         
         Args:
-            x: 輸入特徵
+            x: 輸入特徵或特徵字典
             **kwargs: 額外參數
             
         Returns:

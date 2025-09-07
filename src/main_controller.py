@@ -326,6 +326,10 @@ class CrossDomainSentimentAnalysisController:
         if not hasattr(self, 'preprocessed_data'):
             self.preprocess_data()
         
+        # 訓練特徵提取器（使用所有訓練數據）
+        if not getattr(self, '_extractors_fitted', False):
+            self._fit_feature_extractors()
+        
         self.features = {}
         
         for dataset_name, dataset_splits in self.preprocessed_data.items():
@@ -334,27 +338,26 @@ class CrossDomainSentimentAnalysisController:
             for split_name, split_data in dataset_splits.items():
                 self.logger.info(f"提取特徵 {dataset_name} - {split_name}")
                 
-                # 準備文本數據
-                texts = [item['processed_text'] for item in split_data]
-                aspect_terms = [item['aspect_term'] for item in split_data]
-                aspect_positions = [item['aspect_positions'] for item in split_data if item['aspect_positions']]
+                # 準備數據：原始數據和預處理數據
+                original_data = self.datasets[dataset_name][split_name]
+                processed_data = split_data
                 
                 # 使用多模態特徵提取器
                 extracted_features = self.multi_modal_extractor.extract_features(
-                    texts=texts,
-                    aspect_terms=aspect_terms,
-                    aspect_positions=aspect_positions if aspect_positions else None
+                    data=original_data,
+                    processed_data=processed_data,
+                    batch_size=self.config.get('training', {}).get('batch_size', 16)
                 )
                 
                 self.features[dataset_name][split_name] = {
                     'features': extracted_features,
-                    'labels': [self._sentiment_to_label(item['sentiment']) for item in split_data],
+                    'labels': [self._sentiment_to_label(sample.sentiment) for sample in original_data],
                     'metadata': [{
-                        'text': item['processed_text'],
-                        'aspect_term': item['aspect_term'], 
-                        'aspect_category': item['aspect_category'],
-                        'sentiment': item['sentiment']
-                    } for item in split_data]
+                        'text': processed_item.cleaned_text,
+                        'aspect_term': sample.aspect_term, 
+                        'aspect_category': sample.aspect_category,
+                        'sentiment': sample.sentiment
+                    } for sample, processed_item in zip(original_data, processed_data)]
                 }
         
         self._features_extracted = True
@@ -362,15 +365,57 @@ class CrossDomainSentimentAnalysisController:
         
         return self.features
     
+    def _fit_feature_extractors(self):
+        """訓練特徵提取器"""
+        self.logger.info("訓練特徵提取器...")
+        
+        # 收集所有訓練數據
+        all_train_data = []
+        all_train_processed = []
+        
+        for dataset_name, dataset_splits in self.datasets.items():
+            if 'train' in dataset_splits:
+                all_train_data.extend(dataset_splits['train'])
+                
+        for dataset_name, dataset_splits in self.preprocessed_data.items():
+            if 'train' in dataset_splits:
+                all_train_processed.extend(dataset_splits['train'])
+        
+        # 訓練多模態特徵提取器
+        if all_train_data and all_train_processed:
+            self.multi_modal_extractor.fit(all_train_data, all_train_processed)
+            self._extractors_fitted = True
+            self.logger.info("特徵提取器訓練完成")
+        else:
+            self.logger.warning("沒有找到訓練數據，無法訓練特徵提取器")
+    
     def _sentiment_to_label(self, sentiment: str) -> int:
         """將情感標籤轉換為數字"""
         sentiment_map = {
             'positive': 2,
             'neutral': 1, 
             'negative': 0,
-            'conflict': 3  # 如果有衝突標籤
+            'conflict': 1  # 將衝突標籤映射到中性類別
         }
         return sentiment_map.get(sentiment.lower(), 1)
+    
+    def _get_num_classes(self) -> int:
+        """動態檢測數據集中的類別數量"""
+        all_labels = set()
+        
+        # 從所有數據集收集情感標籤
+        for dataset_name, dataset_splits in self.datasets.items():
+            for split_name, split_data in dataset_splits.items():
+                for sample in split_data:
+                    label = self._sentiment_to_label(sample.sentiment)
+                    all_labels.add(label)
+        
+        # 返回最大標籤值 + 1（因為標籤是從0開始的）
+        max_label = max(all_labels) if all_labels else 2
+        num_classes = max_label + 1
+        
+        self.logger.info(f"檢測到 {num_classes} 個類別，標籤範圍: {sorted(all_labels)}")
+        return num_classes
     
     def build_models(self) -> Dict[str, nn.Module]:
         """
@@ -385,40 +430,44 @@ class CrossDomainSentimentAnalysisController:
             'use_mlp': True,
             'use_attention_enhanced': True,
             'use_cross_domain': True,
-            'num_classes': 3,
             'mlp_hidden_dims': [512, 256],
             'dropout_rate': 0.1,
             'attention_heads': 8,
             'fusion_strategy': 'attention'
         })
         feature_dims = self._get_feature_dimensions()
-        num_classes = model_config.get('num_classes', 3)
+        
+        # 動態檢測類別數量
+        num_classes = self._get_num_classes()
         
         models = {}
         
-        # 基礎MLP分類器
+        # 基礎MLP分類器（需要特徵適配器）
         if model_config.get('use_mlp', True):
-            models['mlp'] = MLPClassifier(
+            mlp_classifier = MLPClassifier(
                 input_dim=sum(feature_dims.values()),
                 num_classes=num_classes,
                 hidden_dims=model_config.get('mlp_hidden_dims', [512, 256]),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
+            # 包裝為接受字典輸入的模型
+            models['mlp'] = FeatureDictToTensorAdapter(mlp_classifier)
         
-        # 注意力增強分類器
+        # 注意力增強分類器（需要特徵適配器）
         if model_config.get('use_attention', True):
-            models['attention'] = AttentionEnhancedClassifier(
+            attention_classifier = AttentionEnhancedClassifier(
                 input_dim=sum(feature_dims.values()),
                 num_classes=num_classes,
                 num_heads=model_config.get('attention_heads', 8),
                 hidden_dim=model_config.get('attention_hidden_dim', 512),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
+            models['attention'] = FeatureDictToTensorAdapter(attention_classifier)
         
-        # 跨領域分類器
+        # 跨領域分類器（需要特徵適配器）
         if model_config.get('use_cross_domain', True):
             num_domains = len(self.datasets)  # 根據數據集數量確定領域數
-            models['cross_domain'] = CrossDomainClassifier(
+            cross_domain_classifier = CrossDomainClassifier(
                 input_dim=sum(feature_dims.values()),
                 num_classes=num_classes,
                 num_domains=num_domains,
@@ -426,6 +475,7 @@ class CrossDomainSentimentAnalysisController:
                 hidden_dim=model_config.get('cross_domain_hidden_dim', 512),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
+            models['cross_domain'] = FeatureDictToTensorAdapter(cross_domain_classifier)
         
         # 多模態特徵融合 + 分類器
         if model_config.get('use_multimodal_fusion', True):
@@ -476,13 +526,55 @@ class CrossDomainSentimentAnalysisController:
         
         # 計算實際維度
         feature_dims = {}
-        for feature_type, feature_tensor in sample_features.items():
-            if isinstance(feature_tensor, torch.Tensor):
-                feature_dims[feature_type] = feature_tensor.shape[-1]
-            elif isinstance(feature_tensor, np.ndarray):
-                feature_dims[feature_type] = feature_tensor.shape[-1]
+        
+        # 從 FeatureVector 對象獲取各特徵的維度
+        if hasattr(sample_features, 'bert_features') and sample_features.bert_features is not None:
+            if isinstance(sample_features.bert_features, torch.Tensor):
+                # 對於多維張量，計算扁平化後的維度（排除批次維度）
+                if sample_features.bert_features.dim() > 1:
+                    # 計算除第一維（批次維度）外所有維度的乘積
+                    feature_dims['bert'] = int(torch.prod(torch.tensor(sample_features.bert_features.shape[1:])))
+                else:
+                    feature_dims['bert'] = sample_features.bert_features.shape[-1]
+            elif isinstance(sample_features.bert_features, np.ndarray):
+                if sample_features.bert_features.ndim > 1:
+                    # 計算除第一維（批次維度）外所有維度的乘積
+                    feature_dims['bert'] = int(np.prod(sample_features.bert_features.shape[1:]))
+                else:
+                    feature_dims['bert'] = sample_features.bert_features.shape[-1]
+        
+        if hasattr(sample_features, 'tfidf_features') and sample_features.tfidf_features is not None:
+            if sample_features.tfidf_features.ndim > 1:
+                # 計算除第一維（批次維度）外所有維度的乘積
+                feature_dims['tfidf'] = int(np.prod(sample_features.tfidf_features.shape[1:]))
             else:
-                feature_dims[feature_type] = len(feature_tensor) if hasattr(feature_tensor, '__len__') else 1
+                feature_dims['tfidf'] = sample_features.tfidf_features.shape[-1] if sample_features.tfidf_features.ndim > 0 else 1
+        
+        if hasattr(sample_features, 'lda_features') and sample_features.lda_features is not None:
+            if sample_features.lda_features.ndim > 1:
+                # 計算除第一維（批次維度）外所有維度的乘積
+                feature_dims['lda'] = int(np.prod(sample_features.lda_features.shape[1:]))
+            else:
+                feature_dims['lda'] = sample_features.lda_features.shape[-1] if sample_features.lda_features.ndim > 0 else 1
+        
+        if hasattr(sample_features, 'statistical_features') and sample_features.statistical_features is not None:
+            if sample_features.statistical_features.ndim > 1:
+                # 計算除第一維（批次維度）外所有維度的乘積
+                feature_dims['statistical'] = int(np.prod(sample_features.statistical_features.shape[1:]))
+            else:
+                feature_dims['statistical'] = sample_features.statistical_features.shape[-1] if sample_features.statistical_features.ndim > 0 else 1
+        
+        if hasattr(sample_features, 'domain_features') and sample_features.domain_features is not None:
+            if sample_features.domain_features.ndim > 1:
+                # 計算除第一維（批次維度）外所有維度的乘積
+                feature_dims['domain'] = int(np.prod(sample_features.domain_features.shape[1:]))
+            else:
+                feature_dims['domain'] = sample_features.domain_features.shape[-1] if sample_features.domain_features.ndim > 0 else 1
+        
+        # 記錄調試信息
+        total_dims = sum(feature_dims.values())
+        self.logger.info(f"特徵維度計算結果: {feature_dims}")
+        self.logger.info(f"總特徵維度: {total_dims}")
         
         return feature_dims
     
@@ -791,17 +883,54 @@ class CrossDomainSentimentAnalysisController:
             self.logger.stop_performance_monitoring()
 
 
+class FeatureDictToTensorAdapter(nn.Module):
+    """將特徵字典轉換為合併張量的適配器"""
+    
+    def __init__(self, wrapped_model: nn.Module):
+        super().__init__()
+        self.wrapped_model = wrapped_model
+    
+    def forward(self, feature_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        # 將特徵字典合併為單一張量
+        feature_tensors = []
+        batch_size = None
+        
+        for feature_name in sorted(feature_dict.keys()):  # 保持一致的順序
+            feature_tensor = feature_dict[feature_name]
+            
+            # 確保所有特徵都有相同的批次維度
+            if batch_size is None:
+                batch_size = feature_tensor.shape[0]
+            
+            # 正確處理不同維度的特徵張量
+            if feature_tensor.dim() == 1:
+                # 一維張量，需要添加批次維度或展平
+                if batch_size > 1:
+                    feature_tensor = feature_tensor.unsqueeze(0).repeat(batch_size, 1)
+                feature_tensors.append(feature_tensor)
+            elif feature_tensor.dim() == 2:
+                # 二維張量 [batch_size, feature_dim]
+                feature_tensors.append(feature_tensor)
+            else:
+                # 高維張量，展平除了批次維度外的所有維度
+                feature_tensor = feature_tensor.view(batch_size, -1)
+                feature_tensors.append(feature_tensor)
+        
+        combined_features = torch.cat(feature_tensors, dim=-1)
+        return self.wrapped_model(combined_features)
+
+
 class SentimentDataset(Dataset):
     """情感分析數據集類"""
     
-    def __init__(self, features: List[Dict[str, torch.Tensor]], 
+    def __init__(self, features: List, 
                  labels: List[int], 
                  metadata: List[Dict[str, Any]]):
         """
         初始化數據集
         
         Args:
-            features: 特徵列表
+            features: 特徵列表（FeatureVector 對象）
             labels: 標籤列表
             metadata: 元數據列表
         """
@@ -815,21 +944,39 @@ class SentimentDataset(Dataset):
         return len(self.features)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        # 合併所有特徵為一個向量
-        feature_tensors = []
-        for feature_type, feature_tensor in self.features[idx].items():
-            if isinstance(feature_tensor, torch.Tensor):
-                feature_tensors.append(feature_tensor.flatten())
-            elif isinstance(feature_tensor, np.ndarray):
-                feature_tensors.append(torch.from_numpy(feature_tensor).float().flatten())
-            else:
-                # 處理其他類型的特徵
-                feature_tensors.append(torch.tensor([feature_tensor], dtype=torch.float32))
+        # 處理 FeatureVector 對象，輸出分離的特徵字典
+        feature_vector = self.features[idx]
+        feature_dict = {}
         
-        combined_features = torch.cat(feature_tensors, dim=0)
+        # 從 FeatureVector 對象提取各種特徵，保持分離狀態
+        if hasattr(feature_vector, 'bert_features') and feature_vector.bert_features is not None:
+            if isinstance(feature_vector.bert_features, torch.Tensor):
+                feature_dict['bert'] = feature_vector.bert_features
+            elif isinstance(feature_vector.bert_features, np.ndarray):
+                feature_dict['bert'] = torch.from_numpy(feature_vector.bert_features).float()
+        
+        if hasattr(feature_vector, 'tfidf_features') and feature_vector.tfidf_features is not None:
+            if isinstance(feature_vector.tfidf_features, np.ndarray):
+                feature_dict['tfidf'] = torch.from_numpy(feature_vector.tfidf_features).float()
+        
+        if hasattr(feature_vector, 'lda_features') and feature_vector.lda_features is not None:
+            if isinstance(feature_vector.lda_features, np.ndarray):
+                feature_dict['lda'] = torch.from_numpy(feature_vector.lda_features).float()
+        
+        if hasattr(feature_vector, 'statistical_features') and feature_vector.statistical_features is not None:
+            if isinstance(feature_vector.statistical_features, np.ndarray):
+                feature_dict['statistical'] = torch.from_numpy(feature_vector.statistical_features).float()
+        
+        if hasattr(feature_vector, 'domain_features') and feature_vector.domain_features is not None:
+            if isinstance(feature_vector.domain_features, np.ndarray):
+                feature_dict['domain'] = torch.from_numpy(feature_vector.domain_features).float()
+        
+        # 如果沒有任何特徵，提供預設特徵
+        if not feature_dict:
+            feature_dict['default'] = torch.zeros(1)
         
         return {
-            'features': combined_features,
+            'features': feature_dict,  # 返回分離的特徵字典
             'labels': torch.tensor(self.labels[idx], dtype=torch.long),
             'metadata': self.metadata[idx]
         }
