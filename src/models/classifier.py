@@ -73,8 +73,15 @@ class BaseClassifier(nn.Module, ABC):
                         feature_tensor = feature_tensor.view(feature_tensor.size(0), -1)
                     feature_tensors.append(feature_tensor)
                 elif isinstance(feature, dict):
-                    # 如果特徵本身是字典，遞歸處理或跳過
-                    print(f"Warning: Skipping nested dict feature '{key}': {type(feature)}")
+                    # 如果特徵本身是字典，遞歸展平處理
+                    try:
+                        flattened_features = self._flatten_dict_features(feature)
+                        if flattened_features is not None and len(flattened_features) > 0:
+                            feature_tensors.extend(flattened_features)
+                        else:
+                            print(f"Warning: 巢狀字典特徵 '{key}' 無有效張量，跳過")
+                    except Exception as e:
+                        print(f"Warning: 處理巢狀字典特徵 '{key}' 時發生錯誤: {e}，跳過")
                     continue
                 else:
                     print(f"Warning: Skipping unsupported feature type '{key}': {type(feature)}")
@@ -88,6 +95,43 @@ class BaseClassifier(nn.Module, ABC):
                 return torch.cat(feature_tensors, dim=-1)
         else:
             return x
+    
+    def _flatten_dict_features(self, feature_dict: Dict) -> List[torch.Tensor]:
+        """
+        遞歸展平字典特徵
+        
+        Args:
+            feature_dict: 包含特徵的字典
+            
+        Returns:
+            展平後的張量列表
+        """
+        feature_tensors = []
+        
+        for key, value in feature_dict.items():
+            try:
+                if isinstance(value, torch.Tensor):
+                    # 如果是多維張量，展平除了批次維度
+                    if value.dim() > 2:
+                        value = value.view(value.size(0), -1)
+                    feature_tensors.append(value)
+                elif isinstance(value, np.ndarray):
+                    tensor_value = torch.from_numpy(value).float()
+                    if tensor_value.dim() > 2:
+                        tensor_value = tensor_value.view(tensor_value.size(0), -1)
+                    feature_tensors.append(tensor_value)
+                elif isinstance(value, dict):
+                    # 遞歸處理巢狀字典
+                    nested_tensors = self._flatten_dict_features(value)
+                    feature_tensors.extend(nested_tensors)
+                else:
+                    # 跳過不支援的資料類型（但不輸出警告，避免過多輸出）
+                    continue
+            except Exception as e:
+                print(f"Warning: 處理字典特徵 '{key}' 時發生錯誤: {e}")
+                continue
+        
+        return feature_tensors
         
     @abstractmethod
     def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
@@ -199,8 +243,8 @@ class MLPClassifier(BaseClassifier):
             actual_input_dim: 實際輸入特徵維度
         """
         if self._expected_input_dim != actual_input_dim:
-            print(f"Warning: Expected input dim {self._expected_input_dim}, got {actual_input_dim}")
-            print("Reinitializing classifier with correct dimensions...")
+            print(f"⚠️  維度不匹配：預期輸入維度 {self._expected_input_dim}，實際得到 {actual_input_dim}")
+            print("🔄 正在使用正確維度重新初始化分類器...")
             
             # 保存當前設備
             device = next(self.parameters()).device
@@ -251,10 +295,18 @@ class MLPClassifier(BaseClassifier):
         # 檢查輸入維度是否與期望的匹配
         actual_input_dim = x.size(-1)
         if actual_input_dim != self._expected_input_dim:
-            raise RuntimeError(
-                f"Input dimension mismatch: expected {self._expected_input_dim}, got {actual_input_dim}. "
-                "Please call reinitialize_for_input_dim() before training."
-            )
+            print(f"⚠️ 前向傳播中檢測到維度不匹配：預期 {self._expected_input_dim}，實際得到 {actual_input_dim}")
+            print("🔄 自動重新初始化模型維度...")
+            # 自動重新初始化
+            if hasattr(self, 'reinitialize_for_input_dim'):
+                self.reinitialize_for_input_dim(actual_input_dim)
+                print("✅ 模型維度重新初始化完成")
+            else:
+                raise RuntimeError(
+                    f"輸入維度不匹配：預期 {self._expected_input_dim}，實際得到 {actual_input_dim}。"
+                    f"請在訓練前呼叫 reinitialize_for_input_dim() 方法。"
+                    f"這個錯誤表示模型期望的輸入特徵數量與實際提供的不同。"
+                )
         
         # 提取特徵
         features = self.feature_extractor(x)
@@ -330,6 +382,58 @@ class AttentionEnhancedClassifier(BaseClassifier):
         
         # 位置編碼（可選）
         self.positional_encoding = nn.Parameter(torch.randn(1, 1, hidden_dim))
+        
+        # 保存初始化參數
+        self._expected_input_dim = input_dim
+        
+    def reinitialize_for_input_dim(self, actual_input_dim: int):
+        """
+        根據實際輸入維度重新初始化網路（當維度不匹配時使用）
+        
+        Args:
+            actual_input_dim: 實際輸入特徵維度
+        """
+        if self._expected_input_dim != actual_input_dim:
+            print(f"⚠️  注意力增強分類器維度不匹配：預期 {self._expected_input_dim}，實際得到 {actual_input_dim}")
+            print("🔄 正在使用正確維度重新初始化注意力增強分類器...")
+            
+            # 保存當前設備
+            device = next(self.parameters()).device
+            
+            # 重建輸入投影層
+            self._expected_input_dim = actual_input_dim
+            self.input_projection = nn.Linear(actual_input_dim, self.hidden_dim).to(device)
+            
+            # 重建其他層（保持原有架構）
+            self.self_attention = nn.MultiheadAttention(
+                embed_dim=self.hidden_dim,
+                num_heads=self.num_heads,
+                dropout=self.dropout_rate,
+                batch_first=True
+            ).to(device)
+            
+            self.feed_forward = nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim * 2),
+                nn.GELU(),
+                nn.Dropout(self.dropout_rate),
+                nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+            ).to(device)
+            
+            self.layer_norm1 = nn.LayerNorm(self.hidden_dim).to(device)
+            self.layer_norm2 = nn.LayerNorm(self.hidden_dim).to(device)
+            
+            self.classifier_head = nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(self.dropout_rate),
+                nn.Linear(self.hidden_dim // 2, self.num_classes)
+            ).to(device)
+            
+            # 重新初始化位置編碼
+            self.positional_encoding = nn.Parameter(torch.randn(1, 1, self.hidden_dim).to(device))
+            
+            return True
+        return False
     
     def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
@@ -439,6 +543,51 @@ class HierarchicalClassifier(BaseClassifier):
             nn.Dropout(dropout_rate),
             nn.Linear(hidden_dim, fine_classes)
         )
+        
+        # 保存初始化參數
+        self._expected_input_dim = input_dim
+        
+    def reinitialize_for_input_dim(self, actual_input_dim: int):
+        """
+        根據實際輸入維度重新初始化網路（當維度不匹配時使用）
+        """
+        if self._expected_input_dim != actual_input_dim:
+            print(f"⚠️  階層式分類器維度不匹配：預期 {self._expected_input_dim}，實際得到 {actual_input_dim}")
+            print("🔄 正在使用正確維度重新初始化階層式分類器...")
+            
+            # 保存當前設備
+            device = next(self.parameters()).device
+            
+            # 重建特徵提取器
+            self._expected_input_dim = actual_input_dim
+            self.feature_extractor = nn.Sequential(
+                nn.Linear(actual_input_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(self.dropout_rate),
+                nn.Linear(self.hidden_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(self.dropout_rate)
+            ).to(device)
+            
+            # 重建分類器（保持原有結構）
+            self.coarse_classifier = nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(self.dropout_rate),
+                nn.Linear(self.hidden_dim // 2, self.coarse_classes)
+            ).to(device)
+            
+            self.fine_classifier = nn.Sequential(
+                nn.Linear(self.hidden_dim + self.coarse_classes, self.hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(self.dropout_rate),
+                nn.Linear(self.hidden_dim, self.fine_classes)
+            ).to(device)
+            
+            return True
+        return False
     
     def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
@@ -547,6 +696,57 @@ class CrossDomainClassifier(BaseClassifier):
         
         # 梯度反轉層權重（用於對抗訓練）
         self.lambda_grl = nn.Parameter(torch.tensor(1.0))
+        
+        # 保存初始化參數
+        self._expected_input_dim = input_dim
+        
+    def reinitialize_for_input_dim(self, actual_input_dim: int):
+        """
+        根據實際輸入維度重新初始化網路（當維度不匹配時使用）
+        """
+        if self._expected_input_dim != actual_input_dim:
+            print(f"⚠️  跨領域分類器維度不匹配：預期 {self._expected_input_dim}，實際得到 {actual_input_dim}")
+            print("🔄 正在使用正確維度重新初始化跨領域分類器...")
+            
+            # 保存當前設備
+            device = next(self.parameters()).device
+            
+            # 重建共享特徵提取器
+            self._expected_input_dim = actual_input_dim
+            self.shared_feature_extractor = nn.Sequential(
+                nn.Linear(actual_input_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(self.dropout_rate)
+            ).to(device)
+            
+            # 重建其他層（保持原有結構）
+            if self.domain_adaptation:
+                self.domain_feature_extractors = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(self.hidden_dim, self.hidden_dim),
+                        nn.LayerNorm(self.hidden_dim),
+                        nn.ReLU(),
+                        nn.Dropout(self.dropout_rate)
+                    ).to(device) for _ in range(self.num_domains)
+                ])
+                
+                self.domain_discriminator = nn.Sequential(
+                    nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+                    nn.ReLU(),
+                    nn.Dropout(self.dropout_rate),
+                    nn.Linear(self.hidden_dim // 2, self.num_domains)
+                ).to(device)
+            
+            self.sentiment_classifier = nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(self.dropout_rate),
+                nn.Linear(self.hidden_dim // 2, self.num_classes)
+            ).to(device)
+            
+            return True
+        return False
     
     def forward(self, 
                 x: Union[torch.Tensor, Dict[str, torch.Tensor]], 

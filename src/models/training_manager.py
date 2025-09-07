@@ -124,86 +124,73 @@ class TrainingManager:
     def _check_and_fix_model_dimensions(self, inputs):
         """檢查並修復模型維度不匹配問題"""
         try:
-            print(f"Checking model dimensions with input type: {type(inputs)}")
-            
-            # 完全複製 _process_input_features 的邏輯來獲取實際維度
+            # 計算實際輸入維度（移除詳細除錯輸出）
             if isinstance(inputs, dict):
-                print(f"Processing dictionary input with keys: {sorted(inputs.keys())}")
                 feature_tensors = []
                 for key in sorted(inputs.keys()):
                     feature = inputs[key]
-                    print(f"Processing feature '{key}' with shape: {feature.shape if hasattr(feature, 'shape') else 'N/A'}")
                     
                     # 確保特徵是張量
                     if isinstance(feature, torch.Tensor):
                         # 如果是多維張量，展平除了批次維度
                         if feature.dim() > 2:
                             feature = feature.view(feature.size(0), -1)
-                            print(f"  Flattened '{key}' to shape: {feature.shape}")
                         feature_tensors.append(feature)
                     else:
-                        print(f"  Skipping non-tensor feature '{key}': {type(feature)}")
                         continue
                 
                 if not feature_tensors:
-                    print("No valid feature tensors found")
                     return
                     
                 # 計算拼接後的總維度
                 individual_dims = [t.size(-1) for t in feature_tensors]
                 actual_dim = sum(individual_dims)
-                print(f"Individual feature dims: {individual_dims}, total: {actual_dim}")
             else:
                 actual_dim = inputs.size(-1)
-                print(f"Single tensor input dimension: {actual_dim}")
             
             # 檢查模型類型和重新初始化方法
             model_reinitialized = False
             
-            # 處理MLP分類器
+            # 檢查並重新初始化模型（僅在需要時顯示訊息）
             if hasattr(self.model, 'reinitialize_for_input_dim'):
-                expected_dim = getattr(self.model, '_expected_input_dim', None)
-                print(f"MLP Classifier expects dimension: {expected_dim}, actual: {actual_dim}")
-                
                 model_reinitialized = self.model.reinitialize_for_input_dim(actual_dim)
+                # 強制更新預期維度
+                if hasattr(self.model, '_expected_input_dim'):
+                    self.model._expected_input_dim = actual_dim
                 
-            # 處理MultiModalFeatureFusion (nn.Sequential)
             elif hasattr(self.model, '__len__') and len(self.model) >= 1:
-                # 檢查是否是Sequential模型，第一層是MultiModalFeatureFusion
+                # 處理Sequential模型，第一層是MultiModalFeatureFusion
                 first_layer = self.model[0]
                 if hasattr(first_layer, 'reinitialize_for_input_dims'):
                     actual_feature_dims = first_layer.calculate_actual_feature_dims(inputs)
-                    print(f"MultiModalFeatureFusion expects dims: {first_layer.feature_dims}")
-                    print(f"Actual feature dims: {actual_feature_dims}")
-                    
                     fusion_reinitialized = first_layer.reinitialize_for_input_dims(actual_feature_dims)
                     
-                    # 如果融合層重新初始化，可能也需要重新初始化分類器
+                    # 如果融合層重新初始化，同時重新初始化分類器
                     if fusion_reinitialized and len(self.model) >= 2:
                         classifier = self.model[1]
                         if hasattr(classifier, 'reinitialize_for_input_dim'):
-                            # 重新初始化分類器以匹配融合層輸出
                             fusion_output_dim = first_layer.fusion_dim
                             classifier.reinitialize_for_input_dim(fusion_output_dim)
-                            print("Also reinitialized classifier for fusion output dimension")
                     
                     model_reinitialized = fusion_reinitialized
                 else:
-                    print(f"First layer type: {type(first_layer)}, does not support reinitialization")
+                    model_reinitialized = False
             else:
-                print(f"Model type: {type(self.model)}, does not support dimension reinitialization")
+                model_reinitialized = False
             
             if model_reinitialized:
-                # 如果模型重新初始化，需要重新創建優化器
-                print("Model reinitialized, recreating optimizer...")
+                # 重新初始化優化器和排程器
+                print("🔄 模型維度已自動調整，重新建立優化器...")
                 self.optimizer = self._setup_optimizer()
                 self.scheduler = self._setup_scheduler()
-                print("Optimizer and scheduler recreated successfully")
+                print("✅ 優化器和排程器重新建立完成")
             else:
-                print("Model dimensions already match, no reinitialization needed")
+                # 除錯：顯示為什麼沒有重新初始化
+                expected_dim = getattr(self.model, '_expected_input_dim', '未知')
+                print(f"🔍 除錯資訊：模型類型 {type(self.model).__name__}, 預期維度: {expected_dim}, 實際維度: {actual_dim}")
                     
         except Exception as e:
-            print(f"Error in dimension checking: {e}")
+            print(f"❌ 維度檢查出現錯誤: {e}")
             import traceback
             traceback.print_exc()
 
@@ -233,7 +220,25 @@ class TrainingManager:
             
             # 前向傳播
             self.optimizer.zero_grad()
-            outputs = self.model(inputs)
+            try:
+                outputs = self.model(inputs)
+            except RuntimeError as e:
+                if "Input dimension mismatch" in str(e) or "輸入維度不匹配" in str(e):
+                    print(f"❌ 捕獲到維度錯誤，嘗試自動修復：{e}")
+                    # 如果維度檢查失敗，再次嘗試修復
+                    self._check_and_fix_model_dimensions(inputs)
+                    print("🔄 已嘗試修復維度問題，重新執行前向傳播...")
+                    # 確保模型在正確設備上
+                    self.model = self.model.to(self.device)
+                    try:
+                        outputs = self.model(inputs)
+                    except RuntimeError as retry_e:
+                        print(f"❌ 重試後仍然失敗：{retry_e}")
+                        print(f"🔍 模型預期維度：{getattr(self.model, '_expected_input_dim', '未知')}")
+                        print(f"🔍 實際輸入維度：{inputs.size(-1) if not isinstance(inputs, dict) else '字典輸入'}")
+                        raise retry_e
+                else:
+                    raise e
             
             # 計算損失
             if isinstance(outputs, dict):
