@@ -13,14 +13,17 @@ from .data_loader import (
     AspectSentiment,
     SemEval2014Loader,
     SemEval2016Loader,
-    DataSplitter
+    CustomDataLoader,
+    DatasetManager
 )
 
 from .preprocessor import (
     AspectDataPreprocessor,
     TextCleaner,
-    BIOTagger,
-    VocabularyBuilder
+    DataSplitter,
+    ProcessedText,
+    AspectTermExtractor,
+    TokenizerWithAlignment
 )
 
 from .feature_extractor import (
@@ -28,13 +31,13 @@ from .feature_extractor import (
     TFIDFFeatureExtractor,
     LDAFeatureExtractor,
     StatisticalFeatureExtractor,
-    MultiModalFeatureExtractor
+    FeatureExtractor as MultiModalFeatureExtractor,
+    FeatureVector
 )
 
 from .cross_domain_aligner import (
     AbstractAspectDefinition,
-    CrossDomainAligner,
-    AlignmentQualityEvaluator
+    CrossDomainAligner
 )
 
 __all__ = [
@@ -42,13 +45,16 @@ __all__ = [
     'AspectSentiment',
     'SemEval2014Loader', 
     'SemEval2016Loader',
+    'CustomDataLoader',
+    'DatasetManager',
     'DataSplitter',
     
     # 預處理相關
     'AspectDataPreprocessor',
     'TextCleaner',
-    'BIOTagger', 
-    'VocabularyBuilder',
+    'ProcessedText',
+    'AspectTermExtractor',
+    'TokenizerWithAlignment',
     
     # 特徵提取相關
     'BERTFeatureExtractor',
@@ -56,6 +62,7 @@ __all__ = [
     'LDAFeatureExtractor',
     'StatisticalFeatureExtractor',
     'MultiModalFeatureExtractor',
+    'FeatureVector',
     
     # 跨領域對齊相關
     'AbstractAspectDefinition',

@@ -24,19 +24,24 @@ import json
 import yaml
 from tqdm import tqdm
 
+# 添加當前目錄到系統路徑以支持絕對導入
+current_dir = Path(__file__).parent
+if str(current_dir) not in sys.path:
+    sys.path.insert(0, str(current_dir))
+
 # 導入所有模組
-from .utils import (
+from utils import (
     ConfigManager, ExperimentLogger, 
     ExperimentManager, set_random_seed
 )
-from .data import (
+from data import (
     SemEval2014Loader, SemEval2016Loader, DataSplitter,
     AspectDataPreprocessor, BERTFeatureExtractor, 
     TFIDFFeatureExtractor, LDAFeatureExtractor,
     StatisticalFeatureExtractor, MultiModalFeatureExtractor,
     CrossDomainAligner, AbstractAspectDefinition
 )
-from .models import (
+from models import (
     AspectAwareBERTEncoder, MultiModalFeatureFusion,
     MultiAttentionCombiner, MLPClassifier, 
     AttentionEnhancedClassifier, CrossDomainClassifier,
@@ -101,9 +106,12 @@ class CrossDomainSentimentAnalysisController:
         self.logger.info("初始化系統組件...")
         
         # 初始化數據預處理器
+        clean_config = self.config.get('preprocessing', {})
+        nlp_model = "en_core_web_sm" if self.config.get('data', {}).get('language', 'en') == 'en' else "zh_core_web_sm"
+        
         self.preprocessor = AspectDataPreprocessor(
-            max_length=self.config['data'].get('max_length', 512),
-            language=self.config['data'].get('language', 'en')
+            clean_config=clean_config if clean_config else None,
+            nlp_model=nlp_model
         )
         
         # 初始化特徵提取器
@@ -117,13 +125,23 @@ class CrossDomainSentimentAnalysisController:
     
     def _initialize_feature_extractors(self):
         """初始化特徵提取器"""
-        feature_config = self.config['features']
+        # 獲取特徵配置，如果不存在則使用預設值
+        feature_config = self.config.get('features', {
+            'use_bert': True,
+            'use_tfidf': True,
+            'use_lda': True,
+            'use_statistical': True,
+            'bert_model': 'bert-base-uncased',
+            'tfidf_max_features': 1000,
+            'tfidf_ngram_range': [1, 2],
+            'lda_topics': 50
+        })
         
         # BERT特徵提取器
         if feature_config.get('use_bert', True):
             self.bert_extractor = BERTFeatureExtractor(
                 model_name=feature_config.get('bert_model', 'bert-base-uncased'),
-                max_length=self.config['data'].get('max_length', 512)
+                max_length=self.config.get('data', {}).get('max_length', 512)
             )
         
         # TF-IDF特徵提取器
@@ -146,12 +164,12 @@ class CrossDomainSentimentAnalysisController:
         
         # 多模態特徵提取器
         self.multi_modal_extractor = MultiModalFeatureExtractor(
-            feature_extractors={
-                'bert': getattr(self, 'bert_extractor', None),
-                'tfidf': getattr(self, 'tfidf_extractor', None),
-                'lda': getattr(self, 'lda_extractor', None),
-                'statistical': getattr(self, 'stats_extractor', None)
-            }
+            bert_model=feature_config.get('bert_model', 'bert-base-uncased'),
+            max_length=self.config.get('data', {}).get('max_length', 512),
+            device='cuda' if torch.cuda.is_available() else 'cpu',
+            use_tfidf=feature_config.get('use_tfidf', True),
+            use_lda=feature_config.get('use_lda', True),
+            use_domain_vocab=feature_config.get('use_domain_vocab', True)
         )
     
     def load_datasets(self) -> Dict[str, Any]:
@@ -166,23 +184,63 @@ class CrossDomainSentimentAnalysisController:
         
         self.logger.info("開始載入數據集...")
         
-        data_config = self.config['data']
+        data_config = self.config.get('data', {
+            'datasets': ['SemEval-2014', 'SemEval-2016'],
+            'semeval_2014_path': 'data/raw/SemEval-2014',
+            'semeval_2016_path': 'data/raw/SemEval-2016',
+            'domains': ['restaurant', 'laptop'],
+            'train_ratio': 0.7,
+            'val_ratio': 0.15,
+            'test_ratio': 0.15
+        })
         datasets_to_load = data_config.get('datasets', ['SemEval-2014', 'SemEval-2016'])
         
         # 載入SemEval數據集
+        domains = data_config.get('domains', ['restaurant', 'laptop'])
+        
         for dataset_name in datasets_to_load:
             if dataset_name == 'SemEval-2014':
                 loader = SemEval2014Loader(data_config.get('semeval_2014_path', 'data/raw/SemEval-2014'))
+                
+                # 載入所有域名的數據
+                all_train_data = []
+                all_test_data = []
+                
+                for domain in domains:
+                    try:
+                        train_data = loader.load_domain_data(domain, 'train')
+                        test_data = loader.load_domain_data(domain, 'test')
+                        all_train_data.extend(train_data)
+                        all_test_data.extend(test_data)
+                        self.logger.info(f"載入 SemEval-2014 {domain} 域: 訓練 {len(train_data)}, 測試 {len(test_data)} 樣本")
+                    except (FileNotFoundError, ValueError) as e:
+                        self.logger.warning(f"無法載入 SemEval-2014 {domain} 域數據: {e}")
+                
                 self.datasets['semeval_2014'] = {
-                    'train': loader.load_data('train'),
-                    'test': loader.load_data('test')
+                    'train': all_train_data,
+                    'test': all_test_data
                 }
                 
             elif dataset_name == 'SemEval-2016':
                 loader = SemEval2016Loader(data_config.get('semeval_2016_path', 'data/raw/SemEval-2016'))
+                
+                # 載入所有域名的數據
+                all_train_data = []
+                all_test_data = []
+                
+                for domain in domains:
+                    try:
+                        train_data = loader.load_domain_data(domain, 'train')
+                        test_data = loader.load_domain_data(domain, 'test')
+                        all_train_data.extend(train_data)
+                        all_test_data.extend(test_data)
+                        self.logger.info(f"載入 SemEval-2016 {domain} 域: 訓練 {len(train_data)}, 測試 {len(test_data)} 樣本")
+                    except (FileNotFoundError, ValueError) as e:
+                        self.logger.warning(f"無法載入 SemEval-2016 {domain} 域數據: {e}")
+                
                 self.datasets['semeval_2016'] = {
-                    'train': loader.load_data('train'),
-                    'test': loader.load_data('test')
+                    'train': all_train_data,
+                    'test': all_test_data
                 }
         
         # 數據分割
@@ -195,24 +253,30 @@ class CrossDomainSentimentAnalysisController:
     
     def _split_datasets(self):
         """分割數據集為訓練、驗證、測試集"""
-        splitter = DataSplitter(
-            train_ratio=self.config['data'].get('train_ratio', 0.7),
-            val_ratio=self.config['data'].get('val_ratio', 0.15),
-            test_ratio=self.config['data'].get('test_ratio', 0.15),
-            random_state=self.config.get('random_seed', 42)
-        )
+        data_config = self.config.get('data', {})
         
         for dataset_name, dataset_splits in self.datasets.items():
             if 'train' in dataset_splits and 'test' in dataset_splits:
                 # 合併訓練和測試數據後重新分割
                 all_data = dataset_splits['train'] + dataset_splits['test']
-                train_data, val_data, test_data = splitter.split_data(all_data)
+                
+                # 使用靜態方法進行數據分割
+                train_data, val_data, test_data = DataSplitter.split_data(
+                    data=all_data,
+                    train_ratio=data_config.get('train_ratio', 0.7),
+                    val_ratio=data_config.get('val_ratio', 0.15),
+                    test_ratio=data_config.get('test_ratio', 0.15),
+                    random_state=self.config.get('random_seed', 42),
+                    stratify_by='sentiment'
+                )
                 
                 self.datasets[dataset_name] = {
                     'train': train_data,
                     'val': val_data, 
                     'test': test_data
                 }
+                
+                self.logger.info(f"{dataset_name} 數據分割完成: 訓練 {len(train_data)}, 驗證 {len(val_data)}, 測試 {len(test_data)} 樣本")
     
     def preprocess_data(self) -> Dict[str, Any]:
         """
@@ -237,19 +301,8 @@ class CrossDomainSentimentAnalysisController:
             for split_name, split_data in dataset_splits.items():
                 self.logger.info(f"預處理 {dataset_name} - {split_name} ({len(split_data)} 條數據)")
                 
-                # 文本預處理
-                processed_data = []
-                for item in tqdm(split_data, desc=f"處理 {dataset_name} {split_name}"):
-                    processed_item = self.preprocessor.preprocess_aspect_data(
-                        text=item.text,
-                        aspect_term=item.aspect_term,
-                        aspect_category=item.aspect_category
-                    )
-                    processed_item.update({
-                        'sentiment': item.sentiment,
-                        'original_item': item
-                    })
-                    processed_data.append(processed_item)
+                # 批量文本預處理
+                processed_data = self.preprocessor.preprocess_dataset(split_data)
                 
                 preprocessed_data[dataset_name][split_name] = processed_data
         
@@ -328,9 +381,18 @@ class CrossDomainSentimentAnalysisController:
         """
         self.logger.info("開始構建模型...")
         
-        model_config = self.config['model']
+        model_config = self.config.get('model', {
+            'use_mlp': True,
+            'use_attention_enhanced': True,
+            'use_cross_domain': True,
+            'num_classes': 3,
+            'mlp_hidden_dims': [512, 256],
+            'dropout_rate': 0.1,
+            'attention_heads': 8,
+            'fusion_strategy': 'attention'
+        })
         feature_dims = self._get_feature_dimensions()
-        num_classes = self.config['model'].get('num_classes', 3)
+        num_classes = model_config.get('num_classes', 3)
         
         models = {}
         
@@ -436,7 +498,7 @@ class CrossDomainSentimentAnalysisController:
         if not self._features_extracted:
             self.extract_features()
         
-        batch_size = self.config['training'].get('batch_size', 16)
+        batch_size = self.config.get('training', {}).get('batch_size', 16)
         self.data_loaders = {}
         
         for dataset_name, dataset_splits in self.features.items():
@@ -475,7 +537,15 @@ class CrossDomainSentimentAnalysisController:
         if not self.data_loaders:
             self.create_data_loaders()
         
-        training_config = self.config['training']
+        training_config = self.config.get('training', {
+            'epochs': 10,
+            'learning_rate': 0.001,
+            'batch_size': 16,
+            'optimizer': 'adam',
+            'scheduler': 'cosine',
+            'early_stopping_patience': 5,
+            'save_best_model': True
+        })
         results = {}
         
         # 對每個模型進行訓練

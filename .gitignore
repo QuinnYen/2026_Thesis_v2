@@ -1,11 +1,392 @@
-/.claude
-/venv
-/outputs
-/experiments
-/data
-/tests
-/docs
-/notebooks
-/logs
-/results
-/reports
+# 跨領域情感分析系統 - .gitignore
+
+# ===========================================
+# Python 相關
+# ===========================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+#   having no cross-platform support, pipenv may install dependencies that don't work, or not
+#   install all needed dependencies.
+#Pipfile.lock
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# ===========================================
+# 深度學習和機器學習
+# ===========================================
+# PyTorch
+*.pth
+*.pt
+*.pkl
+*.pickle
+
+# TensorFlow
+*.pb
+*.ckpt*
+*.meta
+*.index
+*.data-*
+
+# Keras
+*.h5
+*.hdf5
+
+# ONNX
+*.onnx
+
+# 模型檢查點
+checkpoints/
+checkpoint/
+*.checkpoint
+
+# 訓練日誌
+tensorboard_logs/
+wandb/
+mlruns/
+
+# ===========================================
+# 數據文件
+# ===========================================
+# 原始數據（通常很大，不應該提交到版本控制）
+data/raw/
+data/processed/
+data/cache/
+*.csv
+*.tsv
+*.json
+*.jsonl
+*.xml
+*.txt
+*.parquet
+*.feather
+
+# 大型數據文件
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+*.7z
+
+# 數據庫文件
+*.db
+*.sqlite
+*.sqlite3
+
+# ===========================================
+# 實驗和輸出
+# ===========================================
+# 實驗結果
+experiments/
+outputs/
+results/
+reports/
+logs/
+models/
+figures/
+plots/
+
+# 臨時文件
+temp/
+tmp/
+.tmp/
+
+# 實驗配置（可能包含敏感信息）
+experiments/configs/*.yaml
+experiments/configs/*.yml
+experiments/configs/*.json
+!experiments/configs/example_*.yaml
+!experiments/configs/example_*.yml
+!experiments/configs/example_*.json
+
+# ===========================================
+# 系統和IDE
+# ===========================================
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.tmp
+*.temp
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.metadata
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ===========================================
+# 版本控制
+# ===========================================
+# Git
+.git/
+.gitignore.bak
+
+# ===========================================
+# 文檔和筆記本
+# ===========================================
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# 文檔生成
+docs/_build/
+docs/build/
+site/
+
+# ===========================================
+# 測試
+# ===========================================
+# 測試覆蓋率
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# 測試數據
+test_data/
+test_outputs/
+
+# ===========================================
+# 配置和密鑰
+# ===========================================
+# 環境變量
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# API 密鑰和配置
+config/secrets.yaml
+config/secrets.yml
+config/secrets.json
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# ===========================================
+# 特定於本專案
+# ===========================================
+# Claude AI 相關
+.claude/
+
+# 大型模型文件
+*.bin
+*.safetensors
+
+# 預訓練模型緩存
+.cache/
+transformers_cache/
+huggingface_cache/
+
+# 實驗追蹤
+wandb/
+mlflow/
+neptune/
+
+# 性能分析
+*.prof
+*.profile
+
+# 內存轉儲
+*.dmp
+*.hprof
+
+# ===========================================
+# 備份文件
+# ===========================================
+*.bak
+*.backup
+*.old
+*.orig
+*.rej
+*.swp
+*.tmp
+
+# ===========================================
+# 其他
+# ===========================================
+# 日誌文件
+*.log
+logs/
+log/
+
+# 錯誤報告
+error_reports/
+crash_reports/
+
+# 性能監控
+monitoring/
+metrics/
+
+# 部署相關
+deployment/
+docker/
+*.dockerfile
+docker-compose.override.yml
