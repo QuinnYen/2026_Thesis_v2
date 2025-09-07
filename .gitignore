@@ -1,2 +1,11 @@
 /.claude
 /venv
+/outputs
+/experiments
+/data
+/tests
+/docs
+/notebooks
+/logs
+/results
+/reports

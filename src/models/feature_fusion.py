@@ -60,7 +60,7 @@ class MultiModalFeatureFusion(nn.Module):
         # 融合策略實現
         if fusion_strategy == 'concat':
             self.fusion_layer = nn.Sequential(
-                nn.Linear(fusion_dim * len(feature_types), fusion_dim),
+                nn.Linear(fusion_dim * len(self.feature_types), fusion_dim),
                 nn.LayerNorm(fusion_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate)
@@ -68,19 +68,19 @@ class MultiModalFeatureFusion(nn.Module):
         
         elif fusion_strategy == 'attention':
             self.attention_fusion = AttentionBasedFusion(
-                fusion_dim, len(feature_types), dropout_rate
+                fusion_dim, len(self.feature_types), dropout_rate
             )
             self.fusion_layer = nn.Identity()
         
         elif fusion_strategy == 'gated':
             self.gated_fusion = GatedMultiModalFusion(
-                fusion_dim, len(feature_types), dropout_rate
+                fusion_dim, len(self.feature_types), dropout_rate
             )
             self.fusion_layer = nn.Identity()
         
         elif fusion_strategy == 'bilinear':
             self.bilinear_fusion = BilinearFusion(
-                fusion_dim, len(feature_types), dropout_rate
+                fusion_dim, len(self.feature_types), dropout_rate
             )
             self.fusion_layer = nn.Identity()
         

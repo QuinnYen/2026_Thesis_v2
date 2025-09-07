@@ -51,12 +51,12 @@ class SemEval2014Loader:
         self.data_dir = Path(data_dir)
         self.domain_files = {
             'restaurant': {
-                'train': 'Restaurants_Train.xml',
-                'test': 'Restaurants_Test_Gold.xml'
+                'train': 'Restaurants_Train_v2.xml',
+                'test': 'Restaurants_Test_Data_phaseB.xml'
             },
             'laptop': {
-                'train': 'Laptops_Train.xml',
-                'test': 'Laptops_Test_Gold.xml'
+                'train': 'Laptop_Train_v2.xml',
+                'test': 'Laptops_Test_Data_phaseB.xml'
             }
         }
     
@@ -202,16 +202,12 @@ class SemEval2016Loader:
         self.data_dir = Path(data_dir)
         self.domain_files = {
             'restaurant': {
-                'train': 'ABSA16_Restaurants_Train_SB1_v2.xml',
-                'test': 'EN_REST_SB1_TEST.xml'
+                'train': 'restaurants_train_sb1.xml',
+                'test': 'restaurants_test_sb1.xml'
             },
             'laptop': {
-                'train': 'ABSA16_Laptops_Train_SB1_v2.xml', 
-                'test': 'EN_LAPT_SB1_TEST.xml'
-            },
-            'hotel': {
-                'train': 'ABSA16_Hotels_Train_SB1_v2.xml',
-                'test': 'EN_HOTE_SB1_TEST.xml'
+                'train': 'Laptops_Train_sb1.xml',
+                'test': 'laptops_test_sb1.xml'
             }
         }
     
