@@ -442,7 +442,7 @@ class CrossDomainSentimentAnalysisController:
         
         models = {}
         
-        # 基礎MLP分類器（需要特徵適配器）
+        # 基礎MLP分類器
         if model_config.get('use_mlp', True):
             mlp_classifier = MLPClassifier(
                 input_dim=sum(feature_dims.values()),
@@ -450,10 +450,10 @@ class CrossDomainSentimentAnalysisController:
                 hidden_dims=model_config.get('mlp_hidden_dims', [512, 256]),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
-            # 包裝為接受字典輸入的模型
-            models['mlp'] = FeatureDictToTensorAdapter(mlp_classifier)
+            # 直接使用分類器（現在已支持字典輸入）
+            models['mlp'] = mlp_classifier
         
-        # 注意力增強分類器（需要特徵適配器）
+        # 注意力增強分類器
         if model_config.get('use_attention', True):
             attention_classifier = AttentionEnhancedClassifier(
                 input_dim=sum(feature_dims.values()),
@@ -462,9 +462,9 @@ class CrossDomainSentimentAnalysisController:
                 hidden_dim=model_config.get('attention_hidden_dim', 512),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
-            models['attention'] = FeatureDictToTensorAdapter(attention_classifier)
+            models['attention'] = attention_classifier
         
-        # 跨領域分類器（需要特徵適配器）
+        # 跨領域分類器
         if model_config.get('use_cross_domain', True):
             num_domains = len(self.datasets)  # 根據數據集數量確定領域數
             cross_domain_classifier = CrossDomainClassifier(
@@ -475,7 +475,7 @@ class CrossDomainSentimentAnalysisController:
                 hidden_dim=model_config.get('cross_domain_hidden_dim', 512),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
-            models['cross_domain'] = FeatureDictToTensorAdapter(cross_domain_classifier)
+            models['cross_domain'] = cross_domain_classifier
         
         # 多模態特徵融合 + 分類器
         if model_config.get('use_multimodal_fusion', True):

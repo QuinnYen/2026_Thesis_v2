@@ -121,12 +121,100 @@ class TrainingManager:
         else:
             return nn.CrossEntropyLoss()
     
+    def _check_and_fix_model_dimensions(self, inputs):
+        """檢查並修復模型維度不匹配問題"""
+        try:
+            print(f"Checking model dimensions with input type: {type(inputs)}")
+            
+            # 完全複製 _process_input_features 的邏輯來獲取實際維度
+            if isinstance(inputs, dict):
+                print(f"Processing dictionary input with keys: {sorted(inputs.keys())}")
+                feature_tensors = []
+                for key in sorted(inputs.keys()):
+                    feature = inputs[key]
+                    print(f"Processing feature '{key}' with shape: {feature.shape if hasattr(feature, 'shape') else 'N/A'}")
+                    
+                    # 確保特徵是張量
+                    if isinstance(feature, torch.Tensor):
+                        # 如果是多維張量，展平除了批次維度
+                        if feature.dim() > 2:
+                            feature = feature.view(feature.size(0), -1)
+                            print(f"  Flattened '{key}' to shape: {feature.shape}")
+                        feature_tensors.append(feature)
+                    else:
+                        print(f"  Skipping non-tensor feature '{key}': {type(feature)}")
+                        continue
+                
+                if not feature_tensors:
+                    print("No valid feature tensors found")
+                    return
+                    
+                # 計算拼接後的總維度
+                individual_dims = [t.size(-1) for t in feature_tensors]
+                actual_dim = sum(individual_dims)
+                print(f"Individual feature dims: {individual_dims}, total: {actual_dim}")
+            else:
+                actual_dim = inputs.size(-1)
+                print(f"Single tensor input dimension: {actual_dim}")
+            
+            # 檢查模型類型和重新初始化方法
+            model_reinitialized = False
+            
+            # 處理MLP分類器
+            if hasattr(self.model, 'reinitialize_for_input_dim'):
+                expected_dim = getattr(self.model, '_expected_input_dim', None)
+                print(f"MLP Classifier expects dimension: {expected_dim}, actual: {actual_dim}")
+                
+                model_reinitialized = self.model.reinitialize_for_input_dim(actual_dim)
+                
+            # 處理MultiModalFeatureFusion (nn.Sequential)
+            elif hasattr(self.model, '__len__') and len(self.model) >= 1:
+                # 檢查是否是Sequential模型，第一層是MultiModalFeatureFusion
+                first_layer = self.model[0]
+                if hasattr(first_layer, 'reinitialize_for_input_dims'):
+                    actual_feature_dims = first_layer.calculate_actual_feature_dims(inputs)
+                    print(f"MultiModalFeatureFusion expects dims: {first_layer.feature_dims}")
+                    print(f"Actual feature dims: {actual_feature_dims}")
+                    
+                    fusion_reinitialized = first_layer.reinitialize_for_input_dims(actual_feature_dims)
+                    
+                    # 如果融合層重新初始化，可能也需要重新初始化分類器
+                    if fusion_reinitialized and len(self.model) >= 2:
+                        classifier = self.model[1]
+                        if hasattr(classifier, 'reinitialize_for_input_dim'):
+                            # 重新初始化分類器以匹配融合層輸出
+                            fusion_output_dim = first_layer.fusion_dim
+                            classifier.reinitialize_for_input_dim(fusion_output_dim)
+                            print("Also reinitialized classifier for fusion output dimension")
+                    
+                    model_reinitialized = fusion_reinitialized
+                else:
+                    print(f"First layer type: {type(first_layer)}, does not support reinitialization")
+            else:
+                print(f"Model type: {type(self.model)}, does not support dimension reinitialization")
+            
+            if model_reinitialized:
+                # 如果模型重新初始化，需要重新創建優化器
+                print("Model reinitialized, recreating optimizer...")
+                self.optimizer = self._setup_optimizer()
+                self.scheduler = self._setup_scheduler()
+                print("Optimizer and scheduler recreated successfully")
+            else:
+                print("Model dimensions already match, no reinitialization needed")
+                    
+        except Exception as e:
+            print(f"Error in dimension checking: {e}")
+            import traceback
+            traceback.print_exc()
+
     def train_epoch(self) -> Dict[str, float]:
         """訓練一個epoch"""
         self.model.train()
         total_loss = 0
         correct_predictions = 0
         total_samples = 0
+        
+        first_batch = True
         
         for batch in self.train_loader:
             # 移動數據到設備
@@ -137,6 +225,11 @@ class TrainingManager:
                 # 處理單一張量
                 inputs = batch['features'].to(self.device)
             labels = batch['labels'].to(self.device)
+            
+            # 在第一個批次檢查並修復維度不匹配
+            if first_batch:
+                self._check_and_fix_model_dimensions(inputs)
+                first_batch = False
             
             # 前向傳播
             self.optimizer.zero_grad()

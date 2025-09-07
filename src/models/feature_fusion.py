@@ -92,6 +92,70 @@ class MultiModalFeatureFusion(nn.Module):
             nn.Dropout(dropout_rate)
         )
         
+    def calculate_actual_feature_dims(self, features: Dict[str, torch.Tensor]) -> Dict[str, int]:
+        """
+        計算輸入特徵的實際維度
+        """
+        actual_dims = {}
+        for feature_type, feature_tensor in features.items():
+            if isinstance(feature_tensor, torch.Tensor):
+                # 如果是多維張量，展平除了批次維度
+                if feature_tensor.dim() > 2:
+                    actual_dim = int(torch.prod(torch.tensor(feature_tensor.shape[1:])))
+                else:
+                    actual_dim = feature_tensor.shape[-1]
+                actual_dims[feature_type] = actual_dim
+        return actual_dims
+        
+    def reinitialize_for_input_dims(self, actual_feature_dims: Dict[str, int]):
+        """
+        根據實際特徵維度重新初始化特徵投影層
+        """
+        if actual_feature_dims != self.feature_dims:
+            print(f"Warning: Expected feature dims {self.feature_dims}, got {actual_feature_dims}")
+            print("Reinitializing MultiModalFeatureFusion with correct dimensions...")
+            
+            # 保存當前設備
+            device = next(self.parameters()).device
+            
+            # 更新特徵維度
+            self.feature_dims = actual_feature_dims
+            self.feature_types = list(actual_feature_dims.keys())
+            
+            # 重建特徵投影層
+            self.feature_projections = nn.ModuleDict()
+            for feature_type, dim in actual_feature_dims.items():
+                self.feature_projections[feature_type] = nn.Sequential(
+                    nn.Linear(dim, self.fusion_dim),
+                    nn.LayerNorm(self.fusion_dim),
+                    nn.ReLU(),
+                    nn.Dropout(self.dropout_rate)
+                ).to(device)
+            
+            # 重建融合層（如果需要）
+            if self.fusion_strategy == 'concat':
+                self.fusion_layer = nn.Sequential(
+                    nn.Linear(self.fusion_dim * len(self.feature_types), self.fusion_dim),
+                    nn.LayerNorm(self.fusion_dim),
+                    nn.ReLU(),
+                    nn.Dropout(self.dropout_rate)
+                ).to(device)
+            elif self.fusion_strategy == 'attention':
+                self.attention_fusion = AttentionBasedFusion(
+                    self.fusion_dim, len(self.feature_types), self.dropout_rate
+                ).to(device)
+            elif self.fusion_strategy == 'gated':
+                self.gated_fusion = GatedMultiModalFusion(
+                    self.fusion_dim, len(self.feature_types), self.dropout_rate
+                ).to(device)
+            elif self.fusion_strategy == 'bilinear':
+                self.bilinear_fusion = BilinearFusion(
+                    self.fusion_dim, len(self.feature_types), self.dropout_rate
+                ).to(device)
+            
+            return True
+        return False
+        
     def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
         前向傳播
@@ -102,9 +166,27 @@ class MultiModalFeatureFusion(nn.Module):
         Returns:
             融合結果字典
         """
+        # 過濾掉嵌套字典（如 projected_features）
+        filtered_features = {}
+        for feature_type, feature_tensor in features.items():
+            if isinstance(feature_tensor, torch.Tensor):
+                filtered_features[feature_type] = feature_tensor
+            elif isinstance(feature_tensor, dict):
+                print(f"Warning: Skipping nested dict feature '{feature_type}' in forward pass")
+        
+        # 檢查實際特徵維度
+        actual_dims = self.calculate_actual_feature_dims(filtered_features)
+        if actual_dims != self.feature_dims:
+            print(f"Dimension mismatch detected: expected {self.feature_dims}, got {actual_dims}")
+            raise RuntimeError(
+                f"Feature dimension mismatch in MultiModalFeatureFusion. "
+                f"Expected {self.feature_dims}, got {actual_dims}. "
+                f"Please call reinitialize_for_input_dims() before training."
+            )
+        
         # 投影所有特徵到相同維度
         projected_features = {}
-        for feature_type, feature_tensor in features.items():
+        for feature_type, feature_tensor in filtered_features.items():
             if feature_type in self.feature_projections:
                 projected_features[feature_type] = self.feature_projections[feature_type](
                     feature_tensor

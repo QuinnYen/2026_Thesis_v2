@@ -102,12 +102,12 @@ class BaseClassifier(nn.Module, ABC):
         """
         pass
         
-    def predict(self, x: torch.Tensor) -> torch.Tensor:
+    def predict(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
         """
         預測方法
         
         Args:
-            x: 輸入特徵
+            x: 輸入特徵或特徵字典
             
         Returns:
             預測標籤
@@ -118,12 +118,12 @@ class BaseClassifier(nn.Module, ABC):
             predictions = torch.argmax(outputs['logits'], dim=-1)
         return predictions
     
-    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+    def predict_proba(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
         """
         預測機率方法
         
         Args:
-            x: 輸入特徵
+            x: 輸入特徵或特徵字典
             
         Returns:
             預測機率
@@ -162,28 +162,58 @@ class MLPClassifier(BaseClassifier):
         
         self.hidden_dims = hidden_dims
         self.activation = activation
+        self._expected_input_dim = input_dim
         
+        # 直接建立網路層
+        self._build_network(input_dim)
+        
+    def _build_network(self, input_dim: int):
+        """建立網路層"""
         # 建立MLP層
         layers = []
         prev_dim = input_dim
         
-        for hidden_dim in hidden_dims:
+        for hidden_dim in self.hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim),
-                self._get_activation(activation),
-                nn.Dropout(dropout_rate)
+                self._get_activation(self.activation),
+                nn.Dropout(self.dropout_rate)
             ])
             prev_dim = hidden_dim
         
         # 輸出層
-        layers.append(nn.Linear(prev_dim, num_classes))
+        layers.append(nn.Linear(prev_dim, self.num_classes))
         
         self.classifier = nn.Sequential(*layers)
         
         # 特徵提取層（輸出層之前的部分）
         self.feature_extractor = nn.Sequential(*layers[:-1])
         self.output_layer = layers[-1]
+        
+    def reinitialize_for_input_dim(self, actual_input_dim: int):
+        """
+        根據實際輸入維度重新初始化網路（當維度不匹配時使用）
+        
+        Args:
+            actual_input_dim: 實際輸入特徵維度
+        """
+        if self._expected_input_dim != actual_input_dim:
+            print(f"Warning: Expected input dim {self._expected_input_dim}, got {actual_input_dim}")
+            print("Reinitializing classifier with correct dimensions...")
+            
+            # 保存當前設備
+            device = next(self.parameters()).device
+            
+            # 重建網路
+            self._expected_input_dim = actual_input_dim
+            self._build_network(actual_input_dim)
+            
+            # 移動到正確設備
+            self.to(device)
+            
+            return True
+        return False
     
     def _get_activation(self, activation: str) -> nn.Module:
         """
@@ -217,6 +247,14 @@ class MLPClassifier(BaseClassifier):
         """
         # 處理輸入特徵
         x = self._process_input_features(x)
+        
+        # 檢查輸入維度是否與期望的匹配
+        actual_input_dim = x.size(-1)
+        if actual_input_dim != self._expected_input_dim:
+            raise RuntimeError(
+                f"Input dimension mismatch: expected {self._expected_input_dim}, got {actual_input_dim}. "
+                "Please call reinitialize_for_input_dim() before training."
+            )
         
         # 提取特徵
         features = self.feature_extractor(x)
