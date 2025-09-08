@@ -841,6 +841,258 @@ class GradientReversalFunction(torch.autograd.Function):
         return -ctx.lambda_val * grad_output, None
 
 
+class AttentionComparisonClassifier(BaseClassifier):
+    """
+    注意力機制比較分類器
+    
+    專門用於比較不同注意力機制性能的分類器
+    """
+    
+    def __init__(self,
+                 input_dim: int,
+                 num_classes: int,
+                 attention_type: str = 'self_attention',
+                 attention_config: Optional[Dict[str, Any]] = None,
+                 hidden_dim: int = 512,
+                 dropout_rate: float = 0.1):
+        """
+        初始化注意力比較分類器
+        
+        Args:
+            input_dim: 輸入特徵維度
+            num_classes: 分類數量
+            attention_type: 注意力機制類型
+            attention_config: 注意力配置
+            hidden_dim: 隱藏層維度
+            dropout_rate: Dropout比率
+        """
+        super(AttentionComparisonClassifier, self).__init__(input_dim, num_classes, dropout_rate)
+        
+        self.attention_type = attention_type
+        self.hidden_dim = hidden_dim
+        self.attention_config = attention_config or {}
+        
+        # 輸入投影
+        self.input_projection = nn.Linear(input_dim, hidden_dim)
+        
+        # 根據注意力類型創建相應的注意力模組
+        self.attention_layer = self._create_attention_layer()
+        
+        # 後續處理層
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim * 2, hidden_dim)
+        )
+        
+        # 分類頭
+        self.classifier_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim // 2, num_classes)
+        )
+        
+        # 保存初始化參數
+        self._expected_input_dim = input_dim
+        
+    def _create_attention_layer(self):
+        """根據注意力類型創建相應的注意力層"""
+        try:
+            # 嘗試多種導入方式來避免相對導入問題
+            import sys
+            import os
+            
+            # 確保包含專案根目錄
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(os.path.dirname(current_dir))
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+            
+            src_dir = os.path.join(project_root, 'src')
+            if src_dir not in sys.path:
+                sys.path.insert(0, src_dir)
+            
+            # 嘗試絕對導入
+            try:
+                from src.attention.self_attention import BasicSelfAttention, ScaledDotProductSelfAttention
+                from src.attention.multi_head_attention import StandardMultiHeadAttention
+                from src.attention.similarity_attention import CosineSimilarityAttention
+                from src.attention.keyword_guided_attention import KeywordWeightedAttention
+                from src.attention.attention_fusion import CrossAttentionFusion
+            except ImportError:
+                # 嘗試直接從attention包導入
+                from attention.self_attention import BasicSelfAttention, ScaledDotProductSelfAttention
+                from attention.multi_head_attention import StandardMultiHeadAttention
+                from attention.similarity_attention import CosineSimilarityAttention
+                from attention.keyword_guided_attention import KeywordWeightedAttention
+                from attention.attention_fusion import CrossAttentionFusion
+                
+        except ImportError as e:
+            print(f"Warning: 無法導入注意力機制模組: {e}")
+            # 使用PyTorch原生的MultiheadAttention作為後備方案
+            return nn.MultiheadAttention(
+                embed_dim=self.hidden_dim,
+                num_heads=self.attention_config.get('num_heads', 8),
+                dropout=self.dropout_rate,
+                batch_first=True
+            )
+        
+        if self.attention_type == 'self_attention':
+            return BasicSelfAttention(
+                hidden_dim=self.hidden_dim,
+                **self.attention_config
+            )
+        elif self.attention_type == 'scaled_dot_product':
+            return ScaledDotProductSelfAttention(
+                hidden_dim=self.hidden_dim,
+                **self.attention_config
+            )
+        elif self.attention_type == 'multi_head':
+            return StandardMultiHeadAttention(
+                hidden_dim=self.hidden_dim,
+                num_heads=self.attention_config.get('num_heads', 8),
+                **{k: v for k, v in self.attention_config.items() if k != 'num_heads'}
+            )
+        elif self.attention_type == 'cosine_similarity':
+            return CosineSimilarityAttention(
+                input_dim=self.hidden_dim,
+                **self.attention_config
+            )
+        elif self.attention_type == 'keyword_guided':
+            return KeywordWeightedAttention(
+                input_dim=self.hidden_dim,
+                **self.attention_config
+            )
+        elif self.attention_type == 'cross_attention':
+            # CrossAttentionFusion需要attention_modules，如果沒有提供則創建基礎注意力模組
+            attention_modules = self.attention_config.get('attention_modules', [])
+            if not attention_modules:
+                # 創建基礎注意力模組列表作為默認值
+                attention_modules = [
+                    BasicSelfAttention(hidden_dim=self.hidden_dim),
+                    ScaledDotProductSelfAttention(hidden_dim=self.hidden_dim)
+                ]
+            return CrossAttentionFusion(
+                attention_modules=attention_modules,
+                hidden_dim=self.hidden_dim,
+                **{k: v for k, v in self.attention_config.items() if k != 'attention_modules'}
+            )
+        else:
+            # 默認使用基礎自注意力
+            return BasicSelfAttention(hidden_dim=self.hidden_dim)
+    
+    def reinitialize_for_input_dim(self, actual_input_dim: int):
+        """根據實際輸入維度重新初始化網路"""
+        if self._expected_input_dim != actual_input_dim:
+            print(f"⚠️  注意力比較分類器維度不匹配：預期 {self._expected_input_dim}，實際得到 {actual_input_dim}")
+            print("🔄 正在使用正確維度重新初始化注意力比較分類器...")
+            
+            # 保存當前設備
+            device = next(self.parameters()).device
+            
+            # 重建輸入投影層
+            self._expected_input_dim = actual_input_dim
+            self.input_projection = nn.Linear(actual_input_dim, self.hidden_dim).to(device)
+            
+            # 重建注意力層
+            self.attention_layer = self._create_attention_layer().to(device)
+            
+            return True
+        return False
+    
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """
+        前向傳播
+        
+        Args:
+            x: 輸入特徵或特徵字典
+            
+        Returns:
+            分類結果字典
+        """
+        # 處理輸入特徵
+        x = self._process_input_features(x)
+        
+        # 檢查輸入維度
+        actual_input_dim = x.size(-1)
+        if actual_input_dim != self._expected_input_dim:
+            self.reinitialize_for_input_dim(actual_input_dim)
+        
+        # 如果是2D輸入，擴展為3D
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # [batch_size, 1, input_dim]
+        
+        batch_size, seq_len, _ = x.size()
+        
+        # 輸入投影
+        x = self.input_projection(x)  # [batch_size, seq_len, hidden_dim]
+        
+        # 應用注意力機制
+        if hasattr(self.attention_layer, 'forward'):
+            try:
+                # 某些注意力機制需要query, key, value參數
+                if self.attention_type in ['cosine_similarity', 'keyword_guided'] or \
+                   hasattr(self.attention_layer, '__module__') and \
+                   ('similarity_attention' in str(self.attention_layer.__module__) or 
+                    'keyword_guided_attention' in str(self.attention_layer.__module__)):
+                    # 對於需要query, key, value的注意力機制，使用x作為所有三個參數
+                    attended_output = self.attention_layer(query=x, key=x, value=x)
+                else:
+                    # 對於自注意力機制，直接傳入x
+                    attended_output = self.attention_layer(x)
+                
+                # 處理不同注意力機制的返回值
+                if isinstance(attended_output, tuple):
+                    attended_features, attention_weights = attended_output
+                elif isinstance(attended_output, dict):
+                    attended_features = attended_output.get('output', x)
+                    attention_weights = attended_output.get('attention_weights', None)
+                else:
+                    attended_features = attended_output
+                    attention_weights = None
+                    
+            except Exception as e:
+                print(f"注意力層調用失敗 ({self.attention_type}): {e}")
+                # 如果注意力機制調用失敗，使用原始輸入
+                attended_features = x
+                attention_weights = None
+        else:
+            # 如果注意力層沒有forward方法，使用原始輸入
+            attended_features = x
+            attention_weights = None
+        
+        # 殘差連接和層正規化
+        normalized_features = self.layer_norm(x + self.dropout(attended_features))
+        
+        # 前饋網路
+        ff_output = self.feed_forward(normalized_features)
+        final_features = self.layer_norm(normalized_features + self.dropout(ff_output))
+        
+        # 池化（如果序列長度 > 1）
+        if seq_len > 1:
+            pooled_features = torch.mean(final_features, dim=1)
+        else:
+            pooled_features = final_features.squeeze(1)
+        
+        # 分類
+        logits = self.classifier_head(pooled_features)
+        
+        result = {
+            'logits': logits,
+            'features': pooled_features,
+            'probabilities': F.softmax(logits, dim=-1),
+            'attention_type': self.attention_type
+        }
+        
+        if attention_weights is not None:
+            result['attention_weights'] = attention_weights
+        
+        return result
+
+
 class EnsembleClassifier(nn.Module):
     """
     集成分類器

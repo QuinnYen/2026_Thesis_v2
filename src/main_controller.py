@@ -53,8 +53,8 @@ from data import (
 from models import (
     AspectAwareBERTEncoder, MultiModalFeatureFusion,
     MultiAttentionCombiner, MLPClassifier, 
-    AttentionEnhancedClassifier, CrossDomainClassifier,
-    TrainingManager, ModelCache
+    AttentionEnhancedClassifier, AttentionComparisonClassifier, 
+    CrossDomainClassifier, TrainingManager, ModelCache
 )
 
 
@@ -372,6 +372,9 @@ class CrossDomainSentimentAnalysisController:
         self._features_extracted = True
         self.logger.info("特徵提取完成")
         
+        # 初始化跨領域對齊器數據
+        self._initialize_cross_domain_alignment()
+        
         # 生成特徵分佈視覺化
         self._visualize_feature_distribution()
         
@@ -400,6 +403,31 @@ class CrossDomainSentimentAnalysisController:
             self.logger.info("特徵提取器訓練完成")
         else:
             self.logger.warning("沒有找到訓練數據，無法訓練特徵提取器")
+    
+    def _initialize_cross_domain_alignment(self):
+        """初始化跨領域對齊器數據"""
+        self.logger.info("初始化跨領域對齊器...")
+        
+        # 收集所有 AspectSentiment 數據和對應的特徵向量
+        all_aspect_data = []
+        all_feature_vectors = []
+        
+        for dataset_name, dataset_splits in self.datasets.items():
+            for split_name, split_data in dataset_splits.items():
+                if split_name == 'train':  # 只使用訓練數據來建構對齊映射
+                    all_aspect_data.extend(split_data)
+                    
+                    # 獲取對應的特徵向量
+                    if dataset_name in self.features and split_name in self.features[dataset_name]:
+                        features = self.features[dataset_name][split_name]['features']
+                        all_feature_vectors.extend(features)
+        
+        if all_aspect_data and all_feature_vectors:
+            # 初始化跨領域對齊器
+            self.cross_domain_aligner.align_domains(all_aspect_data, all_feature_vectors)
+            self.logger.info(f"跨領域對齊器初始化完成，處理了 {len(all_aspect_data)} 個樣本")
+        else:
+            self.logger.warning("無法初始化跨領域對齊器：缺少數據或特徵向量")
     
     def _sentiment_to_label(self, sentiment: str) -> int:
         """將情感標籤轉換為數字"""
@@ -440,11 +468,13 @@ class CrossDomainSentimentAnalysisController:
         
         model_config = self.config.get('model', {
             'use_mlp': True,
-            'use_attention_enhanced': True,
+            'use_attention': True,
+            'use_attention_comparison': True,  # 新增：啟用注意力機制比較
             'use_cross_domain': True,
             'mlp_hidden_dims': [512, 256],
             'dropout_rate': 0.1,
             'attention_heads': 8,
+            'attention_hidden_dim': 512,
             'fusion_strategy': 'attention'
         })
         feature_dims = self._get_feature_dimensions()
@@ -465,7 +495,7 @@ class CrossDomainSentimentAnalysisController:
             # 直接使用分類器（現在已支持字典輸入）
             models['mlp'] = mlp_classifier
         
-        # 注意力增強分類器
+        # 注意力增強分類器（保持原有的整合版本）
         if model_config.get('use_attention', True):
             attention_classifier = AttentionEnhancedClassifier(
                 input_dim=sum(feature_dims.values()),
@@ -474,7 +504,35 @@ class CrossDomainSentimentAnalysisController:
                 hidden_dim=model_config.get('attention_hidden_dim', 512),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
-            models['attention'] = attention_classifier
+            models['attention_enhanced'] = attention_classifier
+        
+        # 注意力機制比較模型群組
+        if model_config.get('use_attention_comparison', True):
+            attention_hidden_dim = model_config.get('attention_hidden_dim', 512)
+            attention_types = [
+                ('self_attention', '基礎自注意力', {}),
+                ('scaled_dot_product', '縮放點積注意力', {}),
+                ('multi_head', '多頭注意力', {'num_heads': 8}),
+                ('cosine_similarity', '餘弦相似度注意力', {}),
+                ('keyword_guided', '關鍵詞導向注意力', {}),
+                ('cross_attention', '交叉注意力融合', {})
+            ]
+            
+            for attention_type, description, config in attention_types:
+                try:
+                    attention_classifier = AttentionComparisonClassifier(
+                        input_dim=sum(feature_dims.values()),
+                        num_classes=num_classes,
+                        attention_type=attention_type,
+                        attention_config=config,
+                        hidden_dim=attention_hidden_dim,
+                        dropout_rate=model_config.get('dropout_rate', 0.1)
+                    )
+                    models[f'attention_{attention_type}'] = attention_classifier
+                    self.logger.info(f"創建 {description} 分類器 ({attention_type})")
+                except Exception as e:
+                    self.logger.warning(f"創建 {description} 分類器失敗: {e}")
+                    continue
         
         # 跨領域分類器
         if model_config.get('use_cross_domain', True):
@@ -714,48 +772,51 @@ class CrossDomainSentimentAnalysisController:
         if not self._features_extracted:
             self.extract_features()
         
+        # 檢查跨領域對齊器是否已初始化
+        if not hasattr(self.cross_domain_aligner, 'aligned_data') or not self.cross_domain_aligner.aligned_data:
+            self.logger.warning("跨領域對齊器尚未初始化，重新初始化...")
+            self._initialize_cross_domain_alignment()
+        
         alignment_results = {}
         
-        # 獲取所有數據集的特徵
-        all_features = {}
-        all_metadata = {}
+        # 獲取所有測試數據的特徵向量進行評估
+        all_test_features = []
         
         for dataset_name, dataset_splits in self.features.items():
-            # 合併所有分割的數據
-            combined_features = []
-            combined_metadata = []
-            
-            for split_name, split_data in dataset_splits.items():
-                combined_features.extend(split_data['features'])
-                combined_metadata.extend(split_data['metadata'])
-            
-            all_features[dataset_name] = combined_features
-            all_metadata[dataset_name] = combined_metadata
+            # 使用測試數據進行評估
+            if 'test' in dataset_splits:
+                test_features = dataset_splits['test']['features']
+                all_test_features.extend(test_features)
         
-        # 進行跨領域對齊評估
-        for source_domain in all_features.keys():
-            for target_domain in all_features.keys():
-                if source_domain != target_domain:
-                    alignment_key = f"{source_domain}_to_{target_domain}"
-                    
-                    # 合併來源域和目標域的特徵向量
-                    combined_features = []
-                    
-                    # 添加來源域特徵
-                    if source_domain in all_features:
-                        combined_features.extend(all_features[source_domain])
-                    
-                    # 添加目標域特徵
-                    if target_domain in all_features:
-                        combined_features.extend(all_features[target_domain])
-                    
-                    # 計算對齊分數
-                    alignment_score = self.cross_domain_aligner.evaluate_alignment_quality(combined_features)
-                    
-                    alignment_results[alignment_key] = alignment_score
+        # 如果沒有測試數據，使用所有可用數據
+        if not all_test_features:
+            for dataset_name, dataset_splits in self.features.items():
+                for split_name, split_data in dataset_splits.items():
+                    all_test_features.extend(split_data['features'])
+        
+        if all_test_features:
+            # 評估對齊品質
+            alignment_score = self.cross_domain_aligner.evaluate_alignment_quality(all_test_features)
+            alignment_results.update(alignment_score)
+            
+            self.logger.info(f"跨領域對齊評估完成，獲得 {len(alignment_score)} 項指標")
+            
+            # 記錄詳細結果
+            for metric_name, score in alignment_score.items():
+                if isinstance(score, (int, float)):
+                    self.logger.info(f"  {metric_name}: {score:.4f}")
+                elif isinstance(score, dict) and score:
+                    self.logger.info(f"  {metric_name}: {list(score.keys())}")
+        else:
+            self.logger.error("無法進行跨領域對齊評估：沒有找到特徵向量")
+            alignment_results = {
+                "average_cohesion": 0.0,
+                "cohesion_per_aspect": {},
+                "average_separation": 1.0,
+                "alignment_statistics": {}
+            }
         
         self.experiment_results['cross_domain_alignment'] = alignment_results
-        self.logger.info("跨領域對齊評估完成")
         
         # 生成跨領域對齊視覺化
         self._visualize_cross_domain_alignment(alignment_results)
@@ -782,6 +843,7 @@ class CrossDomainSentimentAnalysisController:
             },
             'data_statistics': self._generate_data_statistics(),
             'model_performance': self.experiment_results.get('training', {}),
+            'attention_mechanism_comparison': self._generate_attention_comparison_analysis(),
             'cross_domain_alignment': self.experiment_results.get('cross_domain_alignment', {}),
             'feature_analysis': self._analyze_features()
         }
@@ -817,6 +879,98 @@ class CrossDomainSentimentAnalysisController:
             stats[dataset_name] = dataset_stats
         
         return stats
+    
+    def _generate_attention_comparison_analysis(self) -> Dict[str, Any]:
+        """生成注意力機制比較分析"""
+        if not hasattr(self, 'experiment_results') or 'training' not in self.experiment_results:
+            return {}
+        
+        training_results = self.experiment_results['training']
+        attention_comparison = {
+            'mechanisms_tested': [],
+            'performance_ranking': [],
+            'detailed_results': {},
+            'statistical_analysis': {},
+            'best_performing_mechanism': None
+        }
+        
+        # 識別注意力模型
+        attention_models = {}
+        other_models = {}
+        
+        for model_name, model_results in training_results.items():
+            if model_name.startswith('attention_'):
+                attention_type = model_name.replace('attention_', '')
+                attention_models[attention_type] = model_results
+                attention_comparison['mechanisms_tested'].append(attention_type)
+            else:
+                other_models[model_name] = model_results
+        
+        if not attention_models:
+            return {'error': '未找到注意力機制比較結果'}
+        
+        # 計算每個注意力機制的平均性能
+        mechanism_performance = {}
+        for mechanism, model_results in attention_models.items():
+            accuracies = []
+            f1_scores = []
+            
+            for dataset_name, dataset_results in model_results.items():
+                if 'test_metrics' in dataset_results:
+                    metrics = dataset_results['test_metrics']
+                    accuracies.append(metrics.get('accuracy', 0))
+                    f1_scores.append(metrics.get('f1', 0))
+            
+            if accuracies:
+                mechanism_performance[mechanism] = {
+                    'avg_accuracy': np.mean(accuracies),
+                    'std_accuracy': np.std(accuracies),
+                    'avg_f1': np.mean(f1_scores) if f1_scores else 0,
+                    'std_f1': np.std(f1_scores) if f1_scores else 0,
+                    'num_datasets': len(accuracies)
+                }
+        
+        # 排名
+        sorted_mechanisms = sorted(mechanism_performance.items(), 
+                                 key=lambda x: x[1]['avg_accuracy'], 
+                                 reverse=True)
+        
+        attention_comparison['performance_ranking'] = [
+            {
+                'rank': i + 1,
+                'mechanism': mechanism,
+                'avg_accuracy': f"{performance['avg_accuracy']:.4f}",
+                'avg_f1': f"{performance['avg_f1']:.4f}",
+                'std_accuracy': f"{performance['std_accuracy']:.4f}"
+            }
+            for i, (mechanism, performance) in enumerate(sorted_mechanisms)
+        ]
+        
+        attention_comparison['best_performing_mechanism'] = sorted_mechanisms[0][0] if sorted_mechanisms else None
+        attention_comparison['detailed_results'] = mechanism_performance
+        
+        # 與基線模型比較
+        baseline_comparison = {}
+        if other_models:
+            for baseline_name, baseline_results in other_models.items():
+                baseline_accuracies = []
+                for dataset_name, dataset_results in baseline_results.items():
+                    if 'test_metrics' in dataset_results:
+                        baseline_accuracies.append(dataset_results['test_metrics'].get('accuracy', 0))
+                
+                if baseline_accuracies:
+                    baseline_avg = np.mean(baseline_accuracies)
+                    baseline_comparison[baseline_name] = {
+                        'avg_accuracy': baseline_avg,
+                        'comparison_with_best_attention': {
+                            'improvement': mechanism_performance[sorted_mechanisms[0][0]]['avg_accuracy'] - baseline_avg if sorted_mechanisms else 0,
+                            'relative_improvement': ((mechanism_performance[sorted_mechanisms[0][0]]['avg_accuracy'] - baseline_avg) / baseline_avg * 100) if sorted_mechanisms and baseline_avg > 0 else 0
+                        }
+                    }
+        
+        attention_comparison['baseline_comparison'] = baseline_comparison
+        
+        return attention_comparison
     
     def _analyze_features(self) -> Dict[str, Any]:
         """分析特徵統計信息"""
@@ -961,6 +1115,25 @@ class CrossDomainSentimentAnalysisController:
                 
         except Exception as e:
             self.logger.error(f"字體設定失敗: {e}")
+    
+    def _safe_tight_layout(self, rect=None, pad=1.08, h_pad=None, w_pad=None):
+        """安全的 tight_layout 調整，避免卡住"""
+        import matplotlib.pyplot as plt
+        
+        try:
+            if rect:
+                plt.tight_layout(rect=rect, pad=pad, h_pad=h_pad, w_pad=w_pad)
+            else:
+                plt.tight_layout(pad=pad, h_pad=h_pad, w_pad=w_pad)
+        except Exception as e:
+            self.logger.warning(f"tight_layout 調整失敗，使用手動調整: {e}")
+            # 手動調整子圖間距
+            if rect:
+                plt.subplots_adjust(top=rect[3], bottom=rect[1], 
+                                  left=rect[0], right=rect[2], 
+                                  hspace=0.3, wspace=0.3)
+            else:
+                plt.subplots_adjust(hspace=0.3, wspace=0.3)
 
     def _try_download_chinese_font(self):
         """嘗試下載中文字體"""
@@ -1109,7 +1282,7 @@ class CrossDomainSentimentAnalysisController:
             plt.xlabel('t-SNE 1')
             plt.ylabel('t-SNE 2')
             
-            plt.tight_layout()
+            self._safe_tight_layout()
             plt.savefig(output_dir / 'feature_tsne_distribution.png', dpi=300, bbox_inches='tight')
             plt.close()
             
@@ -1161,7 +1334,7 @@ class CrossDomainSentimentAnalysisController:
             plt.xlabel('主成分')
             plt.ylabel('解釋變異比')
             
-            plt.tight_layout()
+            self._safe_tight_layout()
             plt.savefig(output_dir / 'feature_pca_distribution.png', dpi=300, bbox_inches='tight')
             plt.close()
             
@@ -1266,7 +1439,7 @@ class CrossDomainSentimentAnalysisController:
             plt.ylabel('密度')
             plt.legend()
             
-            plt.tight_layout()
+            self._safe_tight_layout()
             plt.savefig(output_dir / 'cross_domain_semantic_distribution.png', dpi=300, bbox_inches='tight')
             plt.close()
             
@@ -1380,7 +1553,7 @@ class CrossDomainSentimentAnalysisController:
             plt.title('模型穩定性分析')
             plt.legend()
             
-            plt.tight_layout()
+            self._safe_tight_layout()
             plt.savefig(output_dir / 'model_comparison_matrix.png', dpi=300, bbox_inches='tight')
             plt.close()
             
@@ -1432,7 +1605,7 @@ class CrossDomainSentimentAnalysisController:
                     subplot_idx += 1
                 
                 plt.suptitle(f'{model_name} 學習曲線', fontsize=16)
-                plt.tight_layout()
+                self._safe_tight_layout()
                 plt.savefig(output_dir / f'{model_name}_learning_curves.png', dpi=300, bbox_inches='tight')
                 plt.close()
                 
@@ -1499,7 +1672,7 @@ class CrossDomainSentimentAnalysisController:
                               textcoords='offset points',
                               fontsize=8)
             
-            plt.tight_layout()
+            self._safe_tight_layout()
             plt.savefig(output_dir / 'model_performance_radar.png', dpi=300, bbox_inches='tight')
             plt.close()
             
@@ -1544,36 +1717,59 @@ class CrossDomainSentimentAnalysisController:
             # 設定中文字體
             self._setup_chinese_font()
             
+            # 檢查alignment_results的格式，如果不包含domain-to-domain格式，創建簡化視覺化
+            has_domain_pairs = any('_to_' in str(key) for key in alignment_results.keys())
+            
+            if not has_domain_pairs:
+                # 使用現有的統計資料創建視覺化
+                self._create_alignment_summary_chart(alignment_results, output_dir)
+                return
+            
             # 解析對齊結果，構建矩陣
             domains = set()
             for key in alignment_results.keys():
-                source, target = key.split('_to_')
-                domains.add(source)
-                domains.add(target)
+                if '_to_' in str(key):
+                    try:
+                        source, target = str(key).split('_to_')
+                        domains.add(source)
+                        domains.add(target)
+                    except ValueError:
+                        continue  # 跳過不符合格式的鍵
+            
+            if not domains:
+                # 如果沒有找到適當的domain pair，創建摘要圖表
+                self._create_alignment_summary_chart(alignment_results, output_dir)
+                return
             
             domains = sorted(list(domains))
             alignment_matrix = np.zeros((len(domains), len(domains)))
             
             # 填充矩陣
             for key, score in alignment_results.items():
-                source, target = key.split('_to_')
-                source_idx = domains.index(source)
-                target_idx = domains.index(target)
-                
-                # 處理不同類型的分數
-                if isinstance(score, dict):
-                    # 如果是字典，嘗試取主要指標
-                    if 'alignment_score' in score:
-                        alignment_matrix[source_idx, target_idx] = score['alignment_score']
-                    elif 'similarity' in score:
-                        alignment_matrix[source_idx, target_idx] = score['similarity']
-                    else:
-                        # 取平均值或第一個數值
-                        numeric_values = [v for v in score.values() if isinstance(v, (int, float))]
-                        if numeric_values:
-                            alignment_matrix[source_idx, target_idx] = np.mean(numeric_values)
-                elif isinstance(score, (int, float)):
-                    alignment_matrix[source_idx, target_idx] = score
+                if '_to_' not in str(key):
+                    continue
+                    
+                try:
+                    source, target = str(key).split('_to_')
+                    source_idx = domains.index(source)
+                    target_idx = domains.index(target)
+                    
+                    # 處理不同類型的分數
+                    if isinstance(score, dict):
+                        # 如果是字典，嘗試取主要指標
+                        if 'alignment_score' in score:
+                            alignment_matrix[source_idx, target_idx] = score['alignment_score']
+                        elif 'similarity' in score:
+                            alignment_matrix[source_idx, target_idx] = score['similarity']
+                        else:
+                            # 取平均值或第一個數值
+                            numeric_values = [v for v in score.values() if isinstance(v, (int, float))]
+                            if numeric_values:
+                                alignment_matrix[source_idx, target_idx] = np.mean(numeric_values)
+                    elif isinstance(score, (int, float)):
+                        alignment_matrix[source_idx, target_idx] = score
+                except (ValueError, IndexError):
+                    continue
             
             # 對稱填充（假設對齊是雙向的）
             alignment_matrix_sym = (alignment_matrix + alignment_matrix.T) / 2
@@ -1647,41 +1843,181 @@ class CrossDomainSentimentAnalysisController:
                 plt.text(bar.get_x() + bar.get_width()/2., height + 0.01, 
                         f'{height:.3f}', ha='center', va='bottom')
             
-            plt.tight_layout()
+            self._safe_tight_layout()
             plt.savefig(output_dir / 'cross_domain_alignment_heatmap.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
             self.logger.error(f"對齊熱力圖視覺化失敗: {e}")
+            
+    def _create_alignment_summary_chart(self, alignment_results, output_dir):
+        """創建對齊結果摘要圖表"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # 設定中文字體
+            self._setup_chinese_font()
+            
+            plt.figure(figsize=(15, 10))
+            
+            # 1. 整體對齊統計
+            plt.subplot(2, 3, 1)
+            if 'average_cohesion' in alignment_results:
+                cohesion = alignment_results['average_cohesion']
+                separation = alignment_results.get('average_separation', 0)
+                
+                metrics = ['內聚性', '分離度']
+                values = [cohesion, separation]
+                colors = ['skyblue', 'lightcoral']
+                
+                bars = plt.bar(metrics, values, color=colors)
+                plt.title('對齊品質指標')
+                plt.ylabel('分數')
+                plt.ylim(0, 1)
+                
+                # 添加數值標註
+                for bar, value in zip(bars, values):
+                    height = bar.get_height()
+                    plt.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                            f'{value:.3f}', ha='center', va='bottom')
+            
+            # 2. 各面向內聚性分析
+            plt.subplot(2, 3, 2)
+            if 'cohesion_per_aspect' in alignment_results:
+                cohesion_data = alignment_results['cohesion_per_aspect']
+                if isinstance(cohesion_data, dict) and cohesion_data:
+                    aspects = list(cohesion_data.keys())
+                    cohesion_scores = list(cohesion_data.values())
+                    
+                    colors = plt.cm.viridis(np.linspace(0, 1, len(aspects)))
+                    bars = plt.bar(aspects, cohesion_scores, color=colors)
+                    plt.title('各面向內聚性')
+                    plt.ylabel('內聚分數')
+                    plt.xticks(rotation=45, ha='right')
+                    
+                    # 添加數值標註
+                    for bar, score in zip(bars, cohesion_scores):
+                        height = bar.get_height()
+                        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                                f'{score:.3f}', ha='center', va='bottom', fontsize=8)
+            
+            # 3. 對齊統計資訊
+            plt.subplot(2, 3, 3)
+            if 'alignment_statistics' in alignment_results:
+                stats = alignment_results['alignment_statistics']
+                if isinstance(stats, dict):
+                    # 提取數值統計
+                    numeric_stats = {k: v for k, v in stats.items() 
+                                   if isinstance(v, (int, float)) and k != 'cross_domain_coverage'}
+                    
+                    if numeric_stats:
+                        keys = list(numeric_stats.keys())
+                        values = list(numeric_stats.values())
+                        
+                        plt.bar(range(len(keys)), values, color='lightgreen')
+                        plt.title('對齊統計資料')
+                        plt.xticks(range(len(keys)), keys, rotation=45, ha='right')
+                        plt.ylabel('數量/分數')
+            
+            # 4. 如果有面向覆蓋資料
+            if 'cohesion_per_aspect' in alignment_results:
+                plt.subplot(2, 3, 4)
+                cohesion_data = alignment_results['cohesion_per_aspect']
+                if isinstance(cohesion_data, dict) and cohesion_data:
+                    # 創建雷達圖
+                    aspects = list(cohesion_data.keys())
+                    scores = list(cohesion_data.values())
+                    
+                    angles = np.linspace(0, 2 * np.pi, len(aspects), endpoint=False).tolist()
+                    scores += scores[:1]  # 閉合圓圈
+                    angles += angles[:1]
+                    
+                    ax = plt.subplot(2, 3, 4, projection='polar')
+                    ax.plot(angles, scores, 'o-', linewidth=2, color='blue')
+                    ax.fill(angles, scores, alpha=0.25, color='blue')
+                    ax.set_xticks(angles[:-1])
+                    ax.set_xticklabels(aspects)
+                    ax.set_ylim(0, max(scores) * 1.2 if scores else 1)
+                    ax.set_title('面向內聚性雷達圖', pad=20)
+            
+            # 5. 整體摘要文字資訊
+            plt.subplot(2, 3, 5)
+            plt.axis('off')
+            
+            summary_text = "對齊結果摘要:\n\n"
+            if 'average_cohesion' in alignment_results:
+                summary_text += f"• 平均內聚性: {alignment_results['average_cohesion']:.3f}\n"
+            if 'average_separation' in alignment_results:
+                summary_text += f"• 平均分離度: {alignment_results['average_separation']:.3f}\n"
+            if 'alignment_statistics' in alignment_results:
+                stats = alignment_results['alignment_statistics']
+                if isinstance(stats, dict):
+                    for key, value in stats.items():
+                        if isinstance(value, (int, float)):
+                            summary_text += f"• {key}: {value}\n"
+                        elif isinstance(value, (list, tuple)):
+                            summary_text += f"• {key}: {len(value)} 項\n"
+            
+            plt.text(0.1, 0.5, summary_text, fontsize=10, verticalalignment='center',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.5))
+            
+            self._safe_tight_layout()
+            plt.savefig(output_dir / 'cross_domain_alignment_summary.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+        except Exception as e:
+            self.logger.error(f"對齊摘要圖表視覺化失敗: {e}")
     
     def _create_domain_transfer_analysis(self, alignment_results, output_dir):
         """生成領域轉移分析"""
         try:
             import matplotlib.pyplot as plt
-            import networkx as nx
             import numpy as np
             
             # 設定中文字體
             self._setup_chinese_font()
+            
+            # 檢查是否有domain-to-domain格式的數據
+            has_domain_pairs = any('_to_' in str(key) for key in alignment_results.keys())
+            
+            if not has_domain_pairs:
+                # 如果沒有domain pair數據，創建基於現有數據的分析
+                self._create_domain_analysis_summary(alignment_results, output_dir)
+                return
+            
+            # 如果有domain pair數據，執行原始分析
+            try:
+                import networkx as nx
+            except ImportError:
+                self.logger.warning("NetworkX未安裝，跳過網路圖分析")
+                self._create_domain_analysis_summary(alignment_results, output_dir)
+                return
             
             # 創建網路圖
             G = nx.DiGraph()
             
             # 添加節點和邊
             for key, score in alignment_results.items():
-                source, target = key.split('_to_')
-                
-                # 處理分數
-                if isinstance(score, dict):
-                    if 'alignment_score' in score:
-                        weight = score['alignment_score']
+                if '_to_' not in str(key):
+                    continue
+                    
+                try:
+                    source, target = str(key).split('_to_')
+                    
+                    # 處理分數
+                    if isinstance(score, dict):
+                        if 'alignment_score' in score:
+                            weight = score['alignment_score']
+                        else:
+                            numeric_values = [v for v in score.values() if isinstance(v, (int, float))]
+                            weight = np.mean(numeric_values) if numeric_values else 0
                     else:
-                        numeric_values = [v for v in score.values() if isinstance(v, (int, float))]
-                        weight = np.mean(numeric_values) if numeric_values else 0
-                else:
-                    weight = score if isinstance(score, (int, float)) else 0
-                
-                G.add_edge(source, target, weight=weight)
+                        weight = score if isinstance(score, (int, float)) else 0
+                    
+                    G.add_edge(source, target, weight=weight)
+                except ValueError:
+                    continue
             
             plt.figure(figsize=(15, 10))
             
@@ -1789,12 +2125,111 @@ class CrossDomainSentimentAnalysisController:
                 plt.ylabel('目標領域')
                 plt.title('對齊熱區分析')
             
-            plt.tight_layout()
+            self._safe_tight_layout()
             plt.savefig(output_dir / 'domain_transfer_analysis.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
             self.logger.error(f"領域轉移分析視覺化失敗: {e}")
+            
+    def _create_domain_analysis_summary(self, alignment_results, output_dir):
+        """創建領域分析摘要（當沒有domain-to-domain數據時使用）"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # 設定中文字體
+            self._setup_chinese_font()
+            
+            plt.figure(figsize=(12, 8))
+            
+            # 如果有各面向內聚性數據，分析領域覆蓋情況
+            if 'cohesion_per_aspect' in alignment_results:
+                cohesion_data = alignment_results['cohesion_per_aspect']
+                if isinstance(cohesion_data, dict) and cohesion_data:
+                    
+                    plt.subplot(2, 2, 1)
+                    aspects = list(cohesion_data.keys())
+                    scores = list(cohesion_data.values())
+                    
+                    # 面向內聚性分佈
+                    plt.hist(scores, bins=min(10, len(scores)), alpha=0.7, color='skyblue', edgecolor='black')
+                    plt.axvline(np.mean(scores), color='red', linestyle='--', 
+                               label=f'平均值: {np.mean(scores):.3f}')
+                    plt.xlabel('內聚分數')
+                    plt.ylabel('頻率')
+                    plt.title('面向內聚分數分佈')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    
+                    plt.subplot(2, 2, 2)
+                    # 面向相對強度比較
+                    sorted_indices = np.argsort(scores)
+                    sorted_aspects = [aspects[i] for i in sorted_indices]
+                    sorted_scores = [scores[i] for i in sorted_indices]
+                    
+                    colors = plt.cm.RdYlBu_r(np.linspace(0, 1, len(sorted_aspects)))
+                    bars = plt.barh(range(len(sorted_aspects)), sorted_scores, color=colors)
+                    plt.yticks(range(len(sorted_aspects)), sorted_aspects)
+                    plt.xlabel('內聚分數')
+                    plt.title('面向內聚強度排序')
+                    
+                    for i, (bar, score) in enumerate(zip(bars, sorted_scores)):
+                        width = bar.get_width()
+                        plt.text(width + 0.01, bar.get_y() + bar.get_height()/2,
+                                f'{score:.3f}', ha='left', va='center', fontsize=8)
+            
+            # 如果有統計資料，顯示領域覆蓋分析
+            if 'alignment_statistics' in alignment_results:
+                stats = alignment_results['alignment_statistics']
+                if isinstance(stats, dict):
+                    
+                    plt.subplot(2, 2, 3)
+                    # 統計數據視覺化
+                    numeric_stats = {k: v for k, v in stats.items() 
+                                   if isinstance(v, (int, float))}
+                    
+                    if numeric_stats:
+                        keys = list(numeric_stats.keys())[:5]  # 限制顯示項目
+                        values = [numeric_stats[k] for k in keys]
+                        
+                        plt.pie(values, labels=keys, autopct='%1.1f%%', startangle=90)
+                        plt.title('統計資料分佈')
+                    
+                    plt.subplot(2, 2, 4)
+                    # 文字摘要
+                    plt.axis('off')
+                    
+                    summary_text = "領域分析摘要:\n\n"
+                    if 'total_samples' in stats:
+                        summary_text += f"• 總樣本數: {stats['total_samples']}\n"
+                    if 'abstract_aspects' in stats:
+                        summary_text += f"• 抽象面向數: {stats['abstract_aspects']}\n"
+                    if 'samples_per_aspect' in stats:
+                        summary_text += f"• 每面向樣本數: {stats['samples_per_aspect']}\n"
+                    if 'domains_per_aspect' in stats:
+                        summary_text += f"• 每面向領域數: {stats['domains_per_aspect']}\n"
+                    
+                    # 添加整體對齊品質資訊
+                    if 'average_cohesion' in alignment_results:
+                        cohesion = alignment_results['average_cohesion']
+                        summary_text += f"\n• 平均內聚性: {cohesion:.3f}\n"
+                        if cohesion > 0.7:
+                            summary_text += "  ✓ 良好的面向對齊\n"
+                        elif cohesion > 0.5:
+                            summary_text += "  ⚠ 中等的面向對齊\n"
+                        else:
+                            summary_text += "  ✗ 需要改善的面向對齊\n"
+                    
+                    plt.text(0.1, 0.5, summary_text, fontsize=10, verticalalignment='center',
+                            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgreen", alpha=0.5))
+            
+            self._safe_tight_layout()
+            plt.savefig(output_dir / 'domain_transfer_analysis.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+        except Exception as e:
+            self.logger.error(f"領域分析摘要視覺化失敗: {e}")
     
     def _create_comprehensive_dashboard(self):
         """
@@ -1854,7 +2289,10 @@ class CrossDomainSentimentAnalysisController:
             self._plot_conclusions_and_recommendations(ax9)
             
             plt.suptitle('跨領域情感分析實驗 - 綜合儀表板', fontsize=20, fontweight='bold')
-            plt.tight_layout()
+            
+            # 安全的布局調整
+            self._safe_tight_layout(rect=[0, 0.03, 1, 0.95])
+            
             plt.savefig(viz_dir / 'comprehensive_dashboard.png', dpi=300, bbox_inches='tight')
             plt.close()
             
@@ -2414,6 +2852,31 @@ def main(config_path: Optional[str] = None):
                     test_acc = dataset_results['test_metrics'].get('accuracy', 0)
                     print(f"    {dataset_name}: 測試準確率 = {test_acc:.4f}")
         
+        # 打印注意力機制比較結果
+        if 'attention_mechanism_comparison' in results:
+            print("\\n注意力機制比較分析:")
+            attention_comp = results['attention_mechanism_comparison']
+            
+            if 'error' in attention_comp:
+                print(f"  {attention_comp['error']}")
+            else:
+                print(f"  測試的注意力機制數量: {len(attention_comp.get('mechanisms_tested', []))}")
+                
+                if attention_comp.get('best_performing_mechanism'):
+                    print(f"  最佳表現機制: {attention_comp['best_performing_mechanism']}")
+                
+                if attention_comp.get('performance_ranking'):
+                    print("  性能排名:")
+                    for rank_info in attention_comp['performance_ranking'][:3]:  # 顯示前3名
+                        print(f"    {rank_info['rank']}. {rank_info['mechanism']}: "
+                              f"準確率={rank_info['avg_accuracy']}, F1={rank_info['avg_f1']}")
+                
+                if attention_comp.get('baseline_comparison'):
+                    print("  與基線模型比較:")
+                    for baseline, comparison in attention_comp['baseline_comparison'].items():
+                        improvement = comparison['comparison_with_best_attention']['relative_improvement']
+                        print(f"    vs {baseline}: 相對提升 {improvement:.2f}%")
+
         if 'cross_domain_alignment' in results:
             print("\\n跨領域對齊評估:")
             for alignment_key, alignment_score in results['cross_domain_alignment'].items():

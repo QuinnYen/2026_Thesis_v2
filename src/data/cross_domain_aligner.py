@@ -580,28 +580,88 @@ class CrossDomainAligner:
         Returns:
             評估指標字典
         """
-        if not feature_vectors:
-            return {}
+        if not feature_vectors or not self.aligned_data:
+            return {
+                "average_cohesion": 0.0,
+                "cohesion_per_aspect": {},
+                "average_separation": 1.0,
+                "alignment_statistics": self.alignment_statistics if hasattr(self, 'alignment_statistics') else {}
+            }
         
         evaluation_metrics = {}
         
         # 為每個抽象面向計算內聚性和分離度
         aspect_embeddings = defaultdict(list)
         
-        # 收集每個抽象面向的嵌入向量
+        # 從特徵向量中提取BERT嵌入
+        bert_embeddings = []
+        for fv in feature_vectors:
+            if hasattr(fv, 'bert_features') and fv.bert_features is not None:
+                # 處理不同類型的特徵向量
+                if hasattr(fv.bert_features, 'numpy'):
+                    bert_embeddings.append(fv.bert_features.numpy())
+                elif isinstance(fv.bert_features, np.ndarray):
+                    bert_embeddings.append(fv.bert_features)
+                else:
+                    # 嘗試轉換為numpy數組
+                    try:
+                        bert_embeddings.append(np.array(fv.bert_features))
+                    except:
+                        continue
+        
+        # 檢查是否有足夠的嵌入向量
+        if not bert_embeddings:
+            return {
+                "average_cohesion": 0.0,
+                "cohesion_per_aspect": {},
+                "average_separation": 1.0,
+                "alignment_statistics": self.alignment_statistics if hasattr(self, 'alignment_statistics') else {}
+            }
+        
+        # 根據對齊數據的分佈分配嵌入向量到各個抽象面向
+        total_samples = sum(len(samples) for samples in self.aligned_data.values())
+        embedding_index = 0
+        
         for aspect, samples in self.aligned_data.items():
-            for sample in samples:
-                # 找到對應的特徵向量（這裡需要根據實際情況調整索引邏輯）
-                for fv in feature_vectors:
-                    if fv.text_length > 0:  # 簡化的匹配邏輯
-                        aspect_embeddings[aspect].append(fv.bert_features.numpy())
-                        break
+            if not samples:
+                continue
+                
+            aspect_ratio = len(samples) / total_samples
+            num_embeddings = max(1, int(len(bert_embeddings) * aspect_ratio))
+            
+            # 為這個面向分配嵌入向量
+            end_index = min(embedding_index + num_embeddings, len(bert_embeddings))
+            aspect_embeddings[aspect] = bert_embeddings[embedding_index:end_index]
+            embedding_index = end_index
+            
+            if embedding_index >= len(bert_embeddings):
+                break
+        
+        # 如果還有剩餘的嵌入向量，平均分配給所有面向
+        if embedding_index < len(bert_embeddings):
+            remaining_embeddings = bert_embeddings[embedding_index:]
+            aspects_with_data = [k for k in aspect_embeddings.keys() if aspect_embeddings[k]]
+            
+            if aspects_with_data:
+                per_aspect = len(remaining_embeddings) // len(aspects_with_data)
+                remainder = len(remaining_embeddings) % len(aspects_with_data)
+                
+                idx = 0
+                for i, aspect in enumerate(aspects_with_data):
+                    extra = 1 if i < remainder else 0
+                    count = per_aspect + extra
+                    aspect_embeddings[aspect].extend(remaining_embeddings[idx:idx+count])
+                    idx += count
         
         # 計算內聚性
         cohesion_scores = {}
         for aspect, embeddings in aspect_embeddings.items():
             if len(embeddings) > 1:
-                cohesion_scores[aspect] = self.similarity_calculator.calculate_aspect_coherence(embeddings)
+                try:
+                    cohesion_scores[aspect] = self.similarity_calculator.calculate_aspect_coherence(embeddings)
+                except Exception as e:
+                    print(f"計算 {aspect} 內聚性時出錯: {e}")
+                    cohesion_scores[aspect] = 0.0
         
         evaluation_metrics['average_cohesion'] = np.mean(list(cohesion_scores.values())) if cohesion_scores else 0.0
         evaluation_metrics['cohesion_per_aspect'] = cohesion_scores
@@ -612,15 +672,20 @@ class CrossDomainAligner:
         
         for i in range(len(aspects)):
             for j in range(i + 1, len(aspects)):
-                if len(aspect_embeddings[aspects[i]]) > 0 and len(aspect_embeddings[aspects[j]]) > 0:
-                    separation = self.similarity_calculator.calculate_aspect_separation(
-                        aspect_embeddings[aspects[i]], 
-                        aspect_embeddings[aspects[j]]
-                    )
-                    aspect_pairs.append(separation)
+                embeddings_i = aspect_embeddings[aspects[i]]
+                embeddings_j = aspect_embeddings[aspects[j]]
+                
+                if len(embeddings_i) > 0 and len(embeddings_j) > 0:
+                    try:
+                        separation = self.similarity_calculator.calculate_aspect_separation(
+                            embeddings_i, embeddings_j
+                        )
+                        aspect_pairs.append(separation)
+                    except Exception as e:
+                        print(f"計算 {aspects[i]} 和 {aspects[j]} 分離度時出錯: {e}")
         
         evaluation_metrics['average_separation'] = 1.0 - np.mean(aspect_pairs) if aspect_pairs else 1.0
-        evaluation_metrics['alignment_statistics'] = self.alignment_statistics
+        evaluation_metrics['alignment_statistics'] = self.alignment_statistics if hasattr(self, 'alignment_statistics') else {}
         
         return evaluation_metrics
     
