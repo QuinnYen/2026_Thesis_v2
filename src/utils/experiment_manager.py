@@ -104,8 +104,8 @@ class HyperparameterSearcher:
 class ExperimentManager:
     """實驗管理器"""
     
-    def __init__(self, base_config_dir: str = "experiments/configs",
-                 results_dir: str = "experiments/results"):
+    def __init__(self, base_config_dir: str = "configs",
+                 results_dir: str = "outputs/experiments"):
         """
         初始化實驗管理器
         

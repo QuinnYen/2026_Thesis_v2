@@ -47,7 +47,7 @@ from data import (
     SemEval2014Loader, SemEval2016Loader, DataSplitter,
     AspectDataPreprocessor, BERTFeatureExtractor, 
     TFIDFFeatureExtractor, LDAFeatureExtractor,
-    StatisticalFeatureExtractor, MultiModalFeatureExtractor,
+    StatisticalFeatureExtractor, MultiLevelFeatureExtractor,
     CrossDomainAligner, AbstractAspectDefinition
 )
 from models import (
@@ -56,6 +56,18 @@ from models import (
     AttentionEnhancedClassifier, AttentionComparisonClassifier, 
     CrossDomainClassifier, TrainingManager, ModelCache
 )
+
+# 導入實驗框架
+try:
+    from experiments import (
+        Experiment1Controller, Experiment2Controller, Experiment3Controller,
+        create_experiment1_config, create_experiment2_config, create_experiment3_config
+    )
+    EXPERIMENTS_AVAILABLE = True
+except ImportError as e:
+    print(f"警告：實驗框架導入失敗 - {str(e)}")
+    print("將跳過系統性實驗，僅運行基本模型訓練")
+    EXPERIMENTS_AVAILABLE = False
 
 
 class CrossDomainSentimentAnalysisController:
@@ -92,6 +104,10 @@ class CrossDomainSentimentAnalysisController:
         
         # 初始化模型快取
         self.model_cache = ModelCache(self.config.get('model_cache_dir', 'outputs/models'))
+        
+        # 設置設備
+        self.device = self.config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
+        self.logger.info(f"使用設備: {self.device}")
         
         # 組件初始化標記
         self._components_initialized = False
@@ -171,8 +187,8 @@ class CrossDomainSentimentAnalysisController:
         if feature_config.get('use_statistical', True):
             self.stats_extractor = StatisticalFeatureExtractor()
         
-        # 多模態特徵提取器
-        self.multi_modal_extractor = MultiModalFeatureExtractor(
+        # 多層次特徵融合提取器
+        self.multi_level_extractor = MultiLevelFeatureExtractor(
             bert_model=feature_config.get('bert_model', 'bert-base-uncased'),
             max_length=self.config.get('data', {}).get('max_length', 512),
             device='cuda' if torch.cuda.is_available() else 'cpu',
@@ -351,8 +367,8 @@ class CrossDomainSentimentAnalysisController:
                 original_data = self.datasets[dataset_name][split_name]
                 processed_data = split_data
                 
-                # 使用多模態特徵提取器
-                extracted_features = self.multi_modal_extractor.extract_features(
+                # 使用多層次特徵融合提取器
+                extracted_features = self.multi_level_extractor.extract_features(
                     data=original_data,
                     processed_data=processed_data,
                     batch_size=self.config.get('training', {}).get('batch_size', 16)
@@ -396,9 +412,9 @@ class CrossDomainSentimentAnalysisController:
             if 'train' in dataset_splits:
                 all_train_processed.extend(dataset_splits['train'])
         
-        # 訓練多模態特徵提取器
+        # 訓練多層次特徵融合提取器
         if all_train_data and all_train_processed:
-            self.multi_modal_extractor.fit(all_train_data, all_train_processed)
+            self.multi_level_extractor.fit(all_train_data, all_train_processed)
             self._extractors_fitted = True
             self.logger.info("特徵提取器訓練完成")
         else:
@@ -547,8 +563,8 @@ class CrossDomainSentimentAnalysisController:
             )
             models['cross_domain'] = cross_domain_classifier
         
-        # 多模態特徵融合 + 分類器
-        if model_config.get('use_multimodal_fusion', True):
+        # 多層次特徵融合 + 分類器
+        if model_config.get('use_multilevel_fusion', True):
             fusion_model = MultiModalFeatureFusion(
                 feature_dims=feature_dims,
                 fusion_dim=model_config.get('fusion_dim', 512),
@@ -563,7 +579,7 @@ class CrossDomainSentimentAnalysisController:
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
             
-            models['multimodal'] = nn.Sequential(fusion_model, classifier)
+            models['multilevel_fusion'] = nn.Sequential(fusion_model, classifier)
         
         self.models = models
         self.logger.info(f"模型構建完成，共構建 {len(models)} 個模型")
@@ -2596,7 +2612,7 @@ class CrossDomainSentimentAnalysisController:
                         <h3>數據統計</h3>
                         <p><strong>數據集數量:</strong> {num_datasets}</p>
                         <p><strong>總樣本數:</strong> {total_samples}</p>
-                        <p><strong>特徵維度:</strong> 多模態特徵</p>
+                        <p><strong>特徵維度:</strong> 多層次融合特徵</p>
                     </div>
                 </div>
                 
@@ -2722,6 +2738,178 @@ class CrossDomainSentimentAnalysisController:
         
         finally:
             self.logger.stop_performance_monitoring()
+    
+    def run_systematic_experiments(self, run_experiments: str = "all") -> Dict[str, Any]:
+        """
+        運行系統性實驗（實驗1-3）
+        
+        Args:
+            run_experiments: 運行哪些實驗 ("1", "2", "3", "1,2", "1,2,3", "all")
+        
+        Returns:
+            實驗結果字典
+        """
+        if not EXPERIMENTS_AVAILABLE:
+            raise ImportError("實驗框架未正確導入，無法運行系統性實驗")
+        
+        self.logger.info("開始運行系統性實驗...")
+        
+        # 解析要運行的實驗
+        if run_experiments == "all":
+            experiments_to_run = ["1", "2", "3"]
+        else:
+            experiments_to_run = [exp.strip() for exp in run_experiments.split(",")]
+        
+        results = {
+            'systematic_experiments': {
+                'experiments_run': experiments_to_run,
+                'timestamp': datetime.now().isoformat()
+            }
+        }
+        
+        # 創建實驗輸出目錄
+        exp_output_dir = os.path.join(self.config.get('output_dir', 'outputs'), 'systematic_experiments')
+        os.makedirs(exp_output_dir, exist_ok=True)
+        
+        try:
+            # 運行實驗1：融合策略比較
+            if "1" in experiments_to_run:
+                self.logger.info("運行實驗1：融合策略比較")
+                exp1_config = create_experiment1_config()
+                exp1_config.update({
+                    'data': self.config.get('data', {}),
+                    'device': self.device
+                })
+                
+                exp1_controller = Experiment1Controller(
+                    exp1_config, 
+                    os.path.join(exp_output_dir, 'experiment1')
+                )
+                exp1_results = exp1_controller.run_experiment()
+                results['systematic_experiments']['experiment1'] = exp1_results
+                
+                # 生成實驗1摘要
+                exp1_summary = exp1_controller.generate_summary_report()
+                print("\n" + "="*60)
+                print("實驗1：融合策略比較 - 完成")
+                print("="*60)
+                print(exp1_summary)
+            
+            # 運行實驗2：注意力機制比較
+            if "2" in experiments_to_run:
+                self.logger.info("運行實驗2：注意力機制比較")
+                exp2_config = create_experiment2_config()
+                exp2_config.update({
+                    'data': self.config.get('data', {}),
+                    'device': self.device
+                })
+                
+                # 如果實驗1已運行，使用其最佳融合策略
+                best_fusion_strategy = None
+                if "1" in experiments_to_run and 'experiment1' in results['systematic_experiments']:
+                    exp1_report = results['systematic_experiments']['experiment1'].get('report', {})
+                    best_fusion_strategy = exp1_report.get('analysis', {}).get('best_accuracy', {}).get('strategy')
+                    if best_fusion_strategy:
+                        exp2_config['best_fusion_strategy'] = best_fusion_strategy
+                        self.logger.info(f"使用實驗1最佳融合策略: {best_fusion_strategy}")
+                
+                exp2_controller = Experiment2Controller(
+                    exp2_config,
+                    os.path.join(exp_output_dir, 'experiment2')
+                )
+                exp2_results = exp2_controller.run_experiment(best_fusion_strategy)
+                results['systematic_experiments']['experiment2'] = exp2_results
+                
+                # 生成實驗2摘要
+                exp2_summary = exp2_controller.generate_summary_report()
+                print("\n" + "="*60)
+                print("實驗2：注意力機制比較 - 完成")
+                print("="*60)
+                print(exp2_summary)
+            
+            # 運行實驗3：組合效果分析
+            if "3" in experiments_to_run:
+                self.logger.info("運行實驗3：組合效果分析")
+                exp3_config = create_experiment3_config()
+                exp3_config.update({
+                    'data': self.config.get('data', {}),
+                    'device': self.device
+                })
+                
+                exp3_controller = Experiment3Controller(
+                    exp3_config,
+                    os.path.join(exp_output_dir, 'experiment3')
+                )
+                
+                # 如果前面的實驗已運行，使用其結果
+                should_run_integrated = ("1" in experiments_to_run or "2" in experiments_to_run)
+                
+                if should_run_integrated:
+                    # 運行整合實驗流程
+                    run_exp1 = "1" in experiments_to_run and 'experiment1' not in results['systematic_experiments']
+                    run_exp2 = "2" in experiments_to_run and 'experiment2' not in results['systematic_experiments']
+                    
+                    exp3_results = exp3_controller.run_integrated_experiments(
+                        run_exp1=run_exp1, run_exp2=run_exp2
+                    )
+                else:
+                    # 只運行實驗3
+                    exp3_results = exp3_controller.run_experiment()
+                
+                results['systematic_experiments']['experiment3'] = exp3_results
+                
+                # 生成實驗3摘要
+                exp3_summary = exp3_controller.generate_final_summary_report()
+                print("\n" + "="*60)
+                print("實驗3：組合效果分析 - 完成")
+                print("="*60)
+                print(exp3_summary)
+            
+            # 生成整體摘要
+            print("\n" + "="*80)
+            print("系統性實驗全部完成！")
+            print("="*80)
+            print(f"完成實驗: {', '.join([f'實驗{exp}' for exp in experiments_to_run])}")
+            print(f"結果保存位置: {exp_output_dir}")
+            
+            if len(experiments_to_run) >= 2:
+                print("\n主要發現:")
+                print("- 系統性比較了不同融合策略和注意力機制的效果")
+                print("- 通過統計檢驗驗證了改進的顯著性")
+                print("- 提供了詳細的實用指導和建議")
+            
+            # 保存整體實驗結果
+            overall_results_path = os.path.join(exp_output_dir, 'overall_systematic_experiments.json')
+            
+            # 使用自定義JSON編碼器
+            class CustomJSONEncoder(json.JSONEncoder):
+                def default(self, obj):
+                    if isinstance(obj, (np.integer, np.floating)):
+                        return obj.item()
+                    elif isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    elif isinstance(obj, np.bool_):
+                        return bool(obj)
+                    elif isinstance(obj, bool):
+                        return bool(obj)
+                    elif hasattr(obj, '__dict__'):
+                        return obj.__dict__
+                    elif hasattr(obj, '_asdict'):
+                        return obj._asdict()
+                    else:
+                        return str(obj)
+            
+            with open(overall_results_path, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, ensure_ascii=False, cls=CustomJSONEncoder)
+            
+            self.logger.info(f"系統性實驗完成，結果保存到: {overall_results_path}")
+            
+        except Exception as e:
+            self.logger.error(f"系統性實驗執行失敗: {str(e)}")
+            results['systematic_experiments']['error'] = str(e)
+            raise
+        
+        return results
 
 
 class FeatureDictToTensorAdapter(nn.Module):
@@ -2823,72 +3011,127 @@ class SentimentDataset(Dataset):
         }
 
 
-def main(config_path: Optional[str] = None):
+def main(config_path: Optional[str] = None, run_experiments: Optional[str] = None, 
+         experiment_mode: str = "basic"):
     """
     主函數 - 運行完整的跨領域情感分析實驗
     
     Args:
         config_path: 配置文件路徑（可選）
+        run_experiments: 要運行的系統性實驗 ("1", "2", "3", "1,2", "all", None)
+        experiment_mode: 實驗模式 ("basic", "systematic", "both")
     """
     try:
         # 創建主控制器
         controller = CrossDomainSentimentAnalysisController(config_path)
         
-        # 運行完整實驗
-        results = controller.run_complete_experiment()
+        all_results = {}
         
-        print("\\n" + "="*50)
-        print("實驗完成！")
-        print("="*50)
-        print(f"實驗名稱: {results['experiment_info']['name']}")
-        print(f"完成時間: {results['experiment_info']['timestamp']}")
-        
-        # 打印關鍵結果
-        if 'model_performance' in results:
-            print("\\n模型性能總結:")
-            for model_name, model_results in results['model_performance'].items():
-                print(f"  {model_name}:")
-                for dataset_name, dataset_results in model_results.items():
-                    test_acc = dataset_results['test_metrics'].get('accuracy', 0)
-                    print(f"    {dataset_name}: 測試準確率 = {test_acc:.4f}")
-        
-        # 打印注意力機制比較結果
-        if 'attention_mechanism_comparison' in results:
-            print("\\n注意力機制比較分析:")
-            attention_comp = results['attention_mechanism_comparison']
+        # 根據模式決定運行哪些實驗
+        if experiment_mode in ["basic", "both"]:
+            print("運行基本模型訓練和評估...")
+            # 運行基本實驗
+            basic_results = controller.run_complete_experiment()
+            all_results['basic_experiment'] = basic_results
             
-            if 'error' in attention_comp:
-                print(f"  {attention_comp['error']}")
-            else:
-                print(f"  測試的注意力機制數量: {len(attention_comp.get('mechanisms_tested', []))}")
-                
-                if attention_comp.get('best_performing_mechanism'):
-                    print(f"  最佳表現機制: {attention_comp['best_performing_mechanism']}")
-                
-                if attention_comp.get('performance_ranking'):
-                    print("  性能排名:")
-                    for rank_info in attention_comp['performance_ranking'][:3]:  # 顯示前3名
-                        print(f"    {rank_info['rank']}. {rank_info['mechanism']}: "
-                              f"準確率={rank_info['avg_accuracy']}, F1={rank_info['avg_f1']}")
-                
-                if attention_comp.get('baseline_comparison'):
-                    print("  與基線模型比較:")
-                    for baseline, comparison in attention_comp['baseline_comparison'].items():
-                        improvement = comparison['comparison_with_best_attention']['relative_improvement']
-                        print(f"    vs {baseline}: 相對提升 {improvement:.2f}%")
-
-        if 'cross_domain_alignment' in results:
-            print("\\n跨領域對齊評估:")
-            for alignment_key, alignment_score in results['cross_domain_alignment'].items():
-                # 檢查 alignment_score 是否為數字或字典
-                if isinstance(alignment_score, (int, float)):
-                    print(f"  {alignment_key}: {alignment_score:.4f}")
-                elif isinstance(alignment_score, dict):
-                    print(f"  {alignment_key}: {alignment_score}")
-                else:
-                    print(f"  {alignment_key}: {str(alignment_score)}")
+            print("\\n" + "="*50)
+            print("基本實驗完成！")
+            print("="*50)
+            print(f"實驗名稱: {basic_results['experiment_info']['name']}")
+            print(f"完成時間: {basic_results['experiment_info']['timestamp']}")
+            
+            # 打印關鍵結果
+            if 'model_performance' in basic_results:
+                print("\\n模型性能總結:")
+                for model_name, model_results in basic_results['model_performance'].items():
+                    print(f"  {model_name}:")
+                    for dataset_name, dataset_results in model_results.items():
+                        test_acc = dataset_results['test_metrics'].get('accuracy', 0)
+                        print(f"    {dataset_name}: 測試準確率 = {test_acc:.4f}")
         
-        return results
+        # 運行系統性實驗
+        if experiment_mode in ["systematic", "both"] or run_experiments:
+            if not EXPERIMENTS_AVAILABLE:
+                print("\\n警告：實驗框架未正確導入，跳過系統性實驗")
+            else:
+                print("\\n運行系統性實驗...")
+                experiments_to_run = run_experiments or "all"
+                systematic_results = controller.run_systematic_experiments(experiments_to_run)
+                all_results['systematic_experiments'] = systematic_results
+        
+        # 返回結果
+        if experiment_mode == "basic" and not run_experiments:
+            # 只運行基本實驗時，保持原有輸出格式
+            results = basic_results
+            
+            print("\\n" + "="*50)
+            print("基本實驗完成！")
+            print("="*50)
+            print(f"實驗名稱: {results['experiment_info']['name']}")
+            print(f"完成時間: {results['experiment_info']['timestamp']}")
+            
+            # 打印關鍵結果
+            if 'model_performance' in results:
+                print("\\n模型性能總結:")
+                for model_name, model_results in results['model_performance'].items():
+                    print(f"  {model_name}:")
+                    for dataset_name, dataset_results in model_results.items():
+                        test_acc = dataset_results['test_metrics'].get('accuracy', 0)
+                        print(f"    {dataset_name}: 測試準確率 = {test_acc:.4f}")
+            
+            # 打印注意力機制比較結果
+            if 'attention_mechanism_comparison' in results:
+                print("\\n注意力機制比較分析:")
+                attention_comp = results['attention_mechanism_comparison']
+                
+                if 'error' in attention_comp:
+                    print(f"  {attention_comp['error']}")
+                else:
+                    print(f"  測試的注意力機制數量: {len(attention_comp.get('mechanisms_tested', []))}")
+                    
+                    if attention_comp.get('best_performing_mechanism'):
+                        print(f"  最佳表現機制: {attention_comp['best_performing_mechanism']}")
+                    
+                    if attention_comp.get('performance_ranking'):
+                        print("  性能排名:")
+                        for rank_info in attention_comp['performance_ranking'][:3]:  # 顯示前3名
+                            print(f"    {rank_info['rank']}. {rank_info['mechanism']}: "
+                                  f"準確率={rank_info['avg_accuracy']}, F1={rank_info['avg_f1']}")
+                    
+                    if attention_comp.get('baseline_comparison'):
+                        print("  與基線模型比較:")
+                        for baseline, comparison in attention_comp['baseline_comparison'].items():
+                            improvement = comparison['comparison_with_best_attention']['relative_improvement']
+                            print(f"    vs {baseline}: 相對提升 {improvement:.2f}%")
+
+            if 'cross_domain_alignment' in results:
+                print("\\n跨領域對齊評估:")
+                for alignment_key, alignment_score in results['cross_domain_alignment'].items():
+                    # 檢查 alignment_score 是否為數字或字典
+                    if isinstance(alignment_score, (int, float)):
+                        print(f"  {alignment_key}: {alignment_score:.4f}")
+                    elif isinstance(alignment_score, dict):
+                        print(f"  {alignment_key}: {alignment_score}")
+                    else:
+                        print(f"  {alignment_key}: {str(alignment_score)}")
+            
+            return results
+        else:
+            # 運行系統性實驗或組合實驗時，返回所有結果
+            print("\\n" + "="*80)
+            print("所有實驗完成！")
+            print("="*80)
+            print(f"完成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            if 'basic_experiment' in all_results:
+                print("\\n✓ 基本模型訓練和評估 - 已完成")
+            
+            if 'systematic_experiments' in all_results:
+                sys_exp = all_results['systematic_experiments']['systematic_experiments']
+                completed_exps = sys_exp.get('experiments_run', [])
+                print(f"\\n✓ 系統性實驗 - 已完成: {', '.join([f'實驗{exp}' for exp in completed_exps])}")
+            
+            return all_results
         
     except Exception as e:
         print(f"實驗運行失敗: {str(e)}")
@@ -2898,9 +3141,31 @@ def main(config_path: Optional[str] = None):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="跨領域情感分析實驗")
-    parser.add_argument('--config', type=str, default=None, help='配置文件路徑')
+    parser = argparse.ArgumentParser(description="跨領域情感分析實驗系統")
+    parser.add_argument('--config', type=str, default=None, 
+                       help='配置文件路徑')
+    parser.add_argument('--mode', type=str, default="basic", 
+                       choices=["basic", "systematic", "both"],
+                       help='實驗模式: basic(基本訓練), systematic(系統性實驗), both(兩者都運行)')
+    parser.add_argument('--experiments', type=str, default=None,
+                       help='要運行的系統性實驗: 1(融合策略), 2(注意力機制), 3(組合分析), 1,2 或 all')
+    parser.add_argument('--quick', action='store_true',
+                       help='快速模式，減少訓練輪數以加快實驗速度')
     
     args = parser.parse_args()
     
-    main(args.config)
+    # 顯示運行模式
+    print("="*60)
+    print("跨領域情感分析實驗系統")
+    print("="*60)
+    print(f"運行模式: {args.mode}")
+    if args.experiments:
+        print(f"指定實驗: {args.experiments}")
+    if args.quick:
+        print("快速模式: 啟用")
+    print("="*60)
+    
+    # 運行主程序
+    main(config_path=args.config, 
+         run_experiments=args.experiments, 
+         experiment_mode=args.mode)

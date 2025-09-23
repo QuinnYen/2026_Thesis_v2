@@ -5,7 +5,7 @@
 提供以下功能：
 - 數據載入: SemEval 2014/2016 數據集載入器
 - 預處理: 文本清理、分詞、BIO標記、詞彙表構建
-- 特徵提取: BERT、TF-IDF、LDA、統計特徵提取
+- 特徵提取: BERT、TF-IDF、LDA、統計特徵提取、多層次特徵融合
 - 跨領域對齊: 抽象方面對齊、語義相似度計算
 """
 
@@ -31,13 +31,18 @@ from .feature_extractor import (
     TFIDFFeatureExtractor,
     LDAFeatureExtractor,
     StatisticalFeatureExtractor,
-    FeatureExtractor as MultiModalFeatureExtractor,
+    FeatureExtractor as MultiLevelFeatureExtractor,
     FeatureVector
 )
 
 from .cross_domain_aligner import (
     AbstractAspectDefinition,
     CrossDomainAligner
+)
+
+from .data_converter import (
+    AspectSentimentConverter,
+    create_experiment_data_converter
 )
 
 __all__ = [
@@ -61,11 +66,15 @@ __all__ = [
     'TFIDFFeatureExtractor',
     'LDAFeatureExtractor',
     'StatisticalFeatureExtractor',
-    'MultiModalFeatureExtractor',
+    'MultiLevelFeatureExtractor',
     'FeatureVector',
     
     # 跨領域對齊相關
     'AbstractAspectDefinition',
     'CrossDomainAligner',
-    'AlignmentQualityEvaluator'
+    'AlignmentQualityEvaluator',
+    
+    # 數據轉換相關
+    'AspectSentimentConverter',
+    'create_experiment_data_converter'
 ]

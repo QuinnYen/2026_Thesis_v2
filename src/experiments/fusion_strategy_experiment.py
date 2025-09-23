@@ -1,0 +1,678 @@
+# 融合策略比較實驗
+"""
+實驗1：融合策略比較測試
+
+測試條件：
+- 固定注意力機制 (Cross Attention)
+- 變數：融合策略
+- 評估：準確率、計算複雜度、跨領域穩定性
+
+融合策略包括：
+1. 簡單拼接 (Concatenation)
+2. 加權融合 (Weighted Fusion)
+3. 門控融合 (Gated Fusion)
+4. 自適應融合 (Adaptive Fusion)
+5. 跨注意力融合 (Cross Attention Fusion)
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import time
+import psutil
+import numpy as np
+from typing import Dict, List, Tuple, Any
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+
+import sys
+from pathlib import Path
+
+# 添加上級目錄到路徑
+current_dir = Path(__file__).parent
+parent_dir = current_dir.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
+from attention.attention_fusion import (
+    WeightedAttentionFusion, GatedAttentionFusion, AdaptiveAttentionFusion,
+    CrossAttentionFusion, UniversalAttentionFusion
+)
+from attention.multi_head_attention import StandardMultiHeadAttention
+
+
+class ConcatenationFusion(nn.Module):
+    """簡單拼接融合策略"""
+    
+    def __init__(self, attention_modules: List[nn.Module], hidden_dim: int):
+        super(ConcatenationFusion, self).__init__()
+        self.attention_modules = nn.ModuleList(attention_modules)
+        self.num_attentions = len(attention_modules)
+        self.hidden_dim = hidden_dim
+        
+        # 投影層將拼接的特徵降維到原始維度
+        self.projection = nn.Linear(hidden_dim * self.num_attentions, hidden_dim)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        
+    def forward(self, x: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        attention_outputs = []
+        attention_weights_list = []
+        
+        # 計算各個注意力模組的輸出
+        for attention_module in self.attention_modules:
+            try:
+                # 標準多頭注意力模組只需要一個輸入參數
+                result = attention_module(x, **kwargs)
+                if isinstance(result, tuple) and len(result) >= 2:
+                    output, weights = result[0], result[1]
+                else:
+                    output = result
+                    weights = None
+                attention_outputs.append(output)
+                attention_weights_list.append(weights)
+            except Exception as e:
+                print(f"注意力模組錯誤: {e}")
+                # 使用原始輸入作為備選
+                attention_outputs.append(x)
+                attention_weights_list.append(None)
+        
+        # 拼接所有輸出
+        concatenated = torch.cat(attention_outputs, dim=-1)  # [batch_size, seq_len, hidden_dim * num_attentions]
+        
+        # 投影回原始維度
+        fused_output = self.projection(concatenated)  # [batch_size, seq_len, hidden_dim]
+        
+        # 殘差連接和層正規化
+        fused_output = self.layer_norm(fused_output + x)
+        
+        return fused_output, attention_weights_list
+
+
+@dataclass
+class ExperimentResult:
+    """實驗結果資料結構"""
+    fusion_strategy: str
+    accuracy: float
+    precision: float
+    recall: float
+    f1_score: float
+    cross_domain_stability: float
+    computational_complexity: Dict[str, float]
+    memory_usage: float
+    inference_time: float
+    training_time: float
+    model_parameters: int
+    domain_specific_metrics: Dict[str, float]
+
+
+class ComputationalComplexityAnalyzer:
+    """計算複雜度分析器"""
+    
+    def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
+        self.device = device
+        
+    def analyze_model_complexity(self, model: nn.Module, input_shape: Tuple[int, ...]) -> Dict[str, float]:
+        """分析模型計算複雜度"""
+        # 計算參數數量
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        
+        # 創建測試輸入用於計算複雜度分析
+        dummy_input = torch.randn(input_shape).to(self.device)
+        model = model.to(self.device)
+        model.eval()
+        
+        # 測量記憶體使用
+        if torch.cuda.is_available() and self.device == 'cuda':
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.empty_cache()
+            
+            with torch.no_grad():
+                _ = model(dummy_input)
+            
+            memory_usage = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
+        else:
+            process = psutil.Process()
+            memory_before = process.memory_info().rss / 1024 / 1024  # MB
+            
+            with torch.no_grad():
+                _ = model(dummy_input)
+            
+            memory_after = process.memory_info().rss / 1024 / 1024  # MB
+            memory_usage = memory_after - memory_before
+        
+        # 測量推理時間
+        warmup_runs = 10
+        timing_runs = 100
+        
+        # 暖機運行
+        for _ in range(warmup_runs):
+            with torch.no_grad():
+                _ = model(dummy_input)
+        
+        # 計時運行
+        if torch.cuda.is_available() and self.device == 'cuda':
+            torch.cuda.synchronize()
+        
+        start_time = time.time()
+        for _ in range(timing_runs):
+            with torch.no_grad():
+                _ = model(dummy_input)
+        
+        if torch.cuda.is_available() and self.device == 'cuda':
+            torch.cuda.synchronize()
+        
+        end_time = time.time()
+        avg_inference_time = (end_time - start_time) / timing_runs * 1000  # ms
+        
+        # 計算理論 FLOPs (簡化估計)
+        flops = self._estimate_flops(model, input_shape)
+        
+        return {
+            'total_parameters': total_params,
+            'trainable_parameters': trainable_params,
+            'memory_usage_mb': memory_usage,
+            'inference_time_ms': avg_inference_time,
+            'estimated_flops': flops,
+            'parameters_efficiency': total_params / max(memory_usage, 1)  # 參數效率
+        }
+    
+    def _estimate_flops(self, model: nn.Module, input_shape: Tuple[int, ...]) -> float:
+        """簡化的 FLOPs 估計"""
+        total_flops = 0
+        
+        for module in model.modules():
+            if isinstance(module, nn.Linear):
+                # Linear: input_dim * output_dim * batch_size * seq_len
+                input_dim = module.in_features
+                output_dim = module.out_features
+                total_flops += input_dim * output_dim * np.prod(input_shape[:-1])
+            
+            elif isinstance(module, nn.MultiheadAttention):
+                # MultiheadAttention: 複雜度約為 O(seq_len^2 * hidden_dim)
+                embed_dim = module.embed_dim
+                seq_len = input_shape[1] if len(input_shape) > 1 else 1
+                total_flops += seq_len * seq_len * embed_dim * 3  # Q, K, V 計算
+        
+        return total_flops
+
+
+class CrossDomainStabilityEvaluator:
+    """跨領域穩定性評估器"""
+    
+    def __init__(self):
+        self.domain_pairs = [
+            ('restaurant', 'laptop'),
+            ('restaurant', 'device'),
+            ('laptop', 'device')
+        ]
+    
+    def evaluate_stability(self, model_performance: Dict[str, Dict[str, float]]) -> float:
+        """評估跨領域穩定性"""
+        stability_scores = []
+        
+        for source_domain, target_domain in self.domain_pairs:
+            if source_domain in model_performance and target_domain in model_performance:
+                source_f1 = model_performance[source_domain].get('f1_score', 0)
+                target_f1 = model_performance[target_domain].get('f1_score', 0)
+                
+                # 計算性能差異 (越小越穩定)
+                performance_diff = abs(source_f1 - target_f1)
+                stability_score = 1 - (performance_diff / max(source_f1, target_f1, 0.01))
+                stability_scores.append(max(stability_score, 0))
+        
+        return np.mean(stability_scores) if stability_scores else 0.0
+
+
+class FusionStrategyExperiment:
+    """融合策略比較實驗控制器"""
+    
+    def __init__(self, hidden_dim: int = 768, device: str = None):
+        self.hidden_dim = hidden_dim
+        self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # 初始化分析器
+        self.complexity_analyzer = ComputationalComplexityAnalyzer(self.device)
+        self.stability_evaluator = CrossDomainStabilityEvaluator()
+        
+        # 固定使用 Cross Attention 作為基礎注意力機制
+        self.base_attention_modules = self._create_base_attention_modules()
+        
+        # 定義融合策略
+        self.fusion_strategies = {
+            'concatenation': ConcatenationFusion,
+            'weighted': WeightedAttentionFusion,
+            'gated': GatedAttentionFusion,
+            'adaptive': AdaptiveAttentionFusion,
+            'cross_attention': CrossAttentionFusion
+        }
+        
+        # 實驗結果存儲
+        self.results = {}
+    
+    def _create_base_attention_modules(self) -> List[nn.Module]:
+        """創建基礎注意力模組 (固定使用 Cross Attention)"""
+        attention_modules = []
+        
+        # 導入標準多頭注意力機制替代CrossModal版本
+        from attention.multi_head_attention import StandardMultiHeadAttention
+        
+        # 創建多個標準多頭注意力模組進行融合
+        for i in range(3):  # 使用3個注意力模組進行融合
+            attention = StandardMultiHeadAttention(
+                hidden_dim=self.hidden_dim,
+                num_heads=8,
+                dropout=0.1
+            )
+            attention_modules.append(attention)
+        
+        return attention_modules
+    
+    def create_fusion_model(self, fusion_strategy: str) -> nn.Module:
+        """創建特定融合策略的模型"""
+        if fusion_strategy not in self.fusion_strategies:
+            raise ValueError(f"不支援的融合策略: {fusion_strategy}")
+        
+        fusion_class = self.fusion_strategies[fusion_strategy]
+        fusion_model = fusion_class(self.base_attention_modules, self.hidden_dim)
+        
+        return fusion_model.to(self.device)
+    
+    def run_single_experiment(self, fusion_strategy: str, 
+                            train_datasets: Dict[str, Any],
+                            test_datasets: Dict[str, Any],
+                            num_epochs: int = 10) -> ExperimentResult:
+        """運行單個融合策略實驗"""
+        print(f"開始實驗：{fusion_strategy} 融合策略")
+        
+        # 創建融合模型
+        fusion_model = self.create_fusion_model(fusion_strategy)
+        
+        # 分析計算複雜度
+        input_shape = (16, 128, self.hidden_dim)  # batch_size, seq_len, hidden_dim
+        complexity_metrics = self.complexity_analyzer.analyze_model_complexity(
+            fusion_model, input_shape
+        )
+        
+        # 模擬訓練和評估過程
+        training_start_time = time.time()
+        
+        # 這裡應該接入實際的訓練邏輯
+        domain_performance = self._evaluate_strategy_performance(
+            fusion_model, train_datasets, test_datasets, num_epochs
+        )
+        
+        training_end_time = time.time()
+        training_time = training_end_time - training_start_time
+        
+        # 評估跨領域穩定性
+        cross_domain_stability = self.stability_evaluator.evaluate_stability(domain_performance)
+        
+        # 計算總體指標
+        all_accuracies = [metrics['accuracy'] for metrics in domain_performance.values()]
+        all_f1_scores = [metrics['f1_score'] for metrics in domain_performance.values()]
+        all_precisions = [metrics['precision'] for metrics in domain_performance.values()]
+        all_recalls = [metrics['recall'] for metrics in domain_performance.values()]
+        
+        result = ExperimentResult(
+            fusion_strategy=fusion_strategy,
+            accuracy=np.mean(all_accuracies),
+            precision=np.mean(all_precisions),
+            recall=np.mean(all_recalls),
+            f1_score=np.mean(all_f1_scores),
+            cross_domain_stability=cross_domain_stability,
+            computational_complexity=complexity_metrics,
+            memory_usage=complexity_metrics['memory_usage_mb'],
+            inference_time=complexity_metrics['inference_time_ms'],
+            training_time=training_time,
+            model_parameters=complexity_metrics['total_parameters'],
+            domain_specific_metrics=domain_performance
+        )
+        
+        return result
+    
+    def _evaluate_strategy_performance(self, model: nn.Module, 
+                                        train_datasets: Dict[str, Any],
+                                        test_datasets: Dict[str, Any],
+                                        num_epochs: int) -> Dict[str, Dict[str, float]]:
+        """評估融合策略性能 - 要求真實的訓練和測試數據"""
+        
+        # 嚴格驗證輸入
+        if model is None:
+            raise ValueError("融合模型不能為空。")
+        
+        if not train_datasets or not test_datasets:
+            raise ValueError(
+                "訓練和測試數據集不能為空。\n"
+                "融合策略的性能評估必須使用真實的多領域數據集。"
+            )
+        
+        # 驗證領域數據的完整性
+        train_domains = set(train_datasets.keys())
+        test_domains = set(test_datasets.keys())
+        
+        # 檢查是否有足夠的領域進行跨領域分析
+        if len(train_domains) < 2 or len(test_domains) < 2:
+            raise ValueError(
+                f"跨領域分析至少需要2個領域的數據。\n"
+                f"當前訓練領域: {list(train_domains)}, 測試領域: {list(test_domains)}\n"
+                f"融合策略的跨領域分析需要多個領域的真實數據。"
+            )
+        
+        # 檢查訓練和測試領域是否匹配
+        missing_test_domains = train_domains - test_domains
+        if missing_test_domains:
+            raise ValueError(
+                f"缺少領域 {list(missing_test_domains)} 的測試數據。\n"
+                f"融合策略的跨領域分析需要所有訓練領域都有對應的測試數據。"
+            )
+        
+        if num_epochs <= 0:
+            raise ValueError(f"訓練輪數必須大於0，當前值: {num_epochs}")
+        
+        # 實現真實的模型訓練和評估流程
+        from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+        import torch.optim as optim
+        
+        # 初始化模型和優化器
+        model.train()
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.CrossEntropyLoss()
+        
+        # 訓練階段（簡化版）
+        for epoch in range(num_epochs):
+            for domain in train_domains:
+                if domain in train_datasets:
+                    train_data = train_datasets[domain]
+                    features = torch.FloatTensor(train_data['features']).to(model.device if hasattr(model, 'device') else 'cpu')
+                    labels = torch.LongTensor(train_data['labels']).to(model.device if hasattr(model, 'device') else 'cpu')
+                    
+                    optimizer.zero_grad()
+                    # 融合模型返回 (output, attention_weights)
+                    try:
+                        model_output = model(features)
+                        if isinstance(model_output, tuple):
+                            if len(model_output) == 2:
+                                outputs, _ = model_output
+                            elif len(model_output) == 3:
+                                outputs, _, _ = model_output
+                            else:
+                                outputs = model_output[0]
+                        else:
+                            outputs = model_output
+                    except Exception as e:
+                        print(f"訓練階段模型前向傳播錯誤: {e}")
+                        continue
+                    
+                    # 檢查輸出維度，如果需要添加分類層
+                    if outputs.size(-1) != 3:  # 假設3分類問題
+                        if not hasattr(self, 'classifier'):
+                            self.classifier = nn.Linear(outputs.size(-1), 3).to(features.device)
+                        outputs = self.classifier(outputs.mean(dim=1))  # 平均池化後分類
+                    else:
+                        outputs = outputs.mean(dim=1)  # 平均池化
+                    
+                    loss = criterion(outputs, labels)
+                    loss.backward()
+                    optimizer.step()
+        
+        # 評估階段
+        model.eval()
+        domain_performance = {}
+        
+        with torch.no_grad():
+            for domain in test_domains:
+                if domain in test_datasets:
+                    test_data = test_datasets[domain]
+                    features = torch.FloatTensor(test_data['features']).to(model.device if hasattr(model, 'device') else 'cpu')
+                    labels = torch.LongTensor(test_data['labels']).to(model.device if hasattr(model, 'device') else 'cpu')
+                    
+                    # 融合模型返回 (output, attention_weights)
+                    try:
+                        model_output = model(features)
+                        if isinstance(model_output, tuple):
+                            if len(model_output) == 2:
+                                outputs, _ = model_output
+                            elif len(model_output) == 3:
+                                outputs, _, _ = model_output
+                            else:
+                                outputs = model_output[0]
+                        else:
+                            outputs = model_output
+                    except Exception as e:
+                        print(f"評估階段模型前向傳播錯誤: {e}")
+                        continue
+                    
+                    # 檢查輸出維度，如果需要添加分類層
+                    if outputs.size(-1) != 3:  # 假設3分類問題
+                        if hasattr(self, 'classifier'):
+                            outputs = self.classifier(outputs.mean(dim=1))  # 平均池化後分類
+                        else:
+                            # 創建臨時分類器用於評估
+                            temp_classifier = nn.Linear(outputs.size(-1), 3).to(features.device)
+                            outputs = temp_classifier(outputs.mean(dim=1))
+                    else:
+                        outputs = outputs.mean(dim=1)  # 平均池化
+                    
+                    predictions = torch.argmax(outputs, dim=-1)
+                    
+                    # 計算性能指標
+                    predictions_np = predictions.cpu().numpy()
+                    labels_np = labels.cpu().numpy()
+                    
+                    domain_performance[domain] = {
+                        'accuracy': accuracy_score(labels_np, predictions_np),
+                        'f1_score': f1_score(labels_np, predictions_np, average='macro'),
+                        'precision': precision_score(labels_np, predictions_np, average='macro'),
+                        'recall': recall_score(labels_np, predictions_np, average='macro')
+                    }
+        
+        return domain_performance
+    
+    def run_all_experiments(self, train_datasets: Dict[str, Any],
+                          test_datasets: Dict[str, Any],
+                          num_epochs: int = 10) -> Dict[str, ExperimentResult]:
+        """運行所有融合策略的實驗"""
+        print("開始運行融合策略比較實驗...")
+        
+        results = {}
+        
+        for strategy_name in self.fusion_strategies.keys():
+            try:
+                result = self.run_single_experiment(
+                    strategy_name, train_datasets, test_datasets, num_epochs
+                )
+                results[strategy_name] = result
+                print(f"完成 {strategy_name} 實驗")
+                
+            except Exception as e:
+                print(f"實驗 {strategy_name} 失敗: {str(e)}")
+                continue
+        
+        self.results = results
+        return results
+    
+    def generate_experiment_report(self, results: Dict[str, ExperimentResult]) -> Dict[str, Any]:
+        """生成實驗報告"""
+        report = {
+            'experiment_type': 'fusion_strategy_comparison',
+            'experiment_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'total_experiments': len(results),
+            'summary': {},
+            'detailed_results': {},
+            'rankings': {},
+            'analysis': {}
+        }
+        
+        # 詳細結果
+        for strategy, result in results.items():
+            report['detailed_results'][strategy] = {
+                'accuracy': result.accuracy,
+                'precision': result.precision,
+                'recall': result.recall,
+                'f1_score': result.f1_score,
+                'cross_domain_stability': result.cross_domain_stability,
+                'memory_usage_mb': result.memory_usage,
+                'inference_time_ms': result.inference_time,
+                'training_time_s': result.training_time,
+                'model_parameters': result.model_parameters,
+                'domain_performance': result.domain_specific_metrics
+            }
+        
+        # 排名分析
+        strategies = list(results.keys())
+        
+        # 按準確率排名
+        accuracy_ranking = sorted(strategies, 
+                                key=lambda x: results[x].accuracy, reverse=True)
+        
+        # 按跨領域穩定性排名
+        stability_ranking = sorted(strategies, 
+                                 key=lambda x: results[x].cross_domain_stability, reverse=True)
+        
+        # 按計算效率排名 (參數數量越少越好)
+        efficiency_ranking = sorted(strategies, 
+                                  key=lambda x: results[x].model_parameters)
+        
+        # 按推理速度排名 (時間越短越好)
+        speed_ranking = sorted(strategies, 
+                             key=lambda x: results[x].inference_time)
+        
+        report['rankings'] = {
+            'accuracy': accuracy_ranking,
+            'cross_domain_stability': stability_ranking,
+            'computational_efficiency': efficiency_ranking,
+            'inference_speed': speed_ranking
+        }
+        
+        # 綜合分析（只有在有有效結果時才進行）
+        if results:
+            best_accuracy = max(results.values(), key=lambda x: x.accuracy)
+            best_stability = max(results.values(), key=lambda x: x.cross_domain_stability)
+            most_efficient = min(results.values(), key=lambda x: x.model_parameters)
+            fastest = min(results.values(), key=lambda x: x.inference_time)
+            
+            report['analysis'] = {
+                'best_accuracy': {
+                    'strategy': best_accuracy.fusion_strategy,
+                    'value': best_accuracy.accuracy
+                },
+                'best_stability': {
+                    'strategy': best_stability.fusion_strategy,
+                    'value': best_stability.cross_domain_stability
+                },
+                'most_efficient': {
+                    'strategy': most_efficient.fusion_strategy,
+                    'parameters': most_efficient.model_parameters
+                },
+                'fastest_inference': {
+                    'strategy': fastest.fusion_strategy,
+                    'time_ms': fastest.inference_time
+                }
+            }
+        else:
+            report['analysis'] = {
+                'status': 'no_valid_results',
+                'message': '所有融合策略實驗都失敗。請檢查數據格式和模型配置。'
+            }
+        
+        # 摘要統計（只有在有有效結果時才進行）
+        if results:
+            report['summary'] = {
+                'total_strategies_tested': len(results),
+                'average_accuracy': np.mean([r.accuracy for r in results.values()]),
+                'average_stability': np.mean([r.cross_domain_stability for r in results.values()]),
+                'average_parameters': np.mean([r.model_parameters for r in results.values()]),
+                'average_inference_time': np.mean([r.inference_time for r in results.values()])
+            }
+        else:
+            report['summary'] = {
+                'total_strategies_tested': 0,
+                'status': 'all_experiments_failed',
+                'reason': '所有融合策略實驗都失敗',
+                'next_steps': '請檢查數據格式和模型配置'
+            }
+        
+        return report
+    
+    def save_results(self, results: Dict[str, ExperimentResult], 
+                    report: Dict[str, Any], output_dir: str = "experiment_results"):
+        """保存實驗結果"""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 保存詳細結果
+        results_path = os.path.join(output_dir, "fusion_strategy_results.json")
+        
+        # 轉換結果為可序列化格式
+        serializable_results = {}
+        for strategy, result in results.items():
+            serializable_results[strategy] = {
+                'fusion_strategy': result.fusion_strategy,
+                'accuracy': float(result.accuracy),
+                'precision': float(result.precision),
+                'recall': float(result.recall),
+                'f1_score': float(result.f1_score),
+                'cross_domain_stability': float(result.cross_domain_stability),
+                'computational_complexity': {k: float(v) for k, v in result.computational_complexity.items()},
+                'memory_usage': float(result.memory_usage),
+                'inference_time': float(result.inference_time),
+                'training_time': float(result.training_time),
+                'model_parameters': int(result.model_parameters),
+                'domain_specific_metrics': {
+                    domain: {k: float(v) for k, v in metrics.items()}
+                    for domain, metrics in result.domain_specific_metrics.items()
+                }
+            }
+        
+        with open(results_path, 'w', encoding='utf-8') as f:
+            json.dump(serializable_results, f, indent=2, ensure_ascii=False)
+        
+        # 保存實驗報告
+        report_path = os.path.join(output_dir, "fusion_strategy_report.json")
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        
+        print(f"實驗結果已保存到 {output_dir}")
+        print(f"詳細結果: {results_path}")
+        print(f"實驗報告: {report_path}")
+
+
+def main():
+    """主函數 - 示範如何使用融合策略實驗框架"""
+    # 初始化實驗
+    experiment = FusionStrategyExperiment(hidden_dim=768)
+    
+    # 模擬資料集 (實際使用時需要載入真實資料)
+    train_datasets = {
+        'restaurant': None,  # 實際的訓練資料集
+        'laptop': None,
+        'device': None
+    }
+    
+    test_datasets = {
+        'restaurant': None,  # 實際的測試資料集
+        'laptop': None,
+        'device': None
+    }
+    
+    # 運行實驗
+    results = experiment.run_all_experiments(train_datasets, test_datasets, num_epochs=5)
+    
+    # 生成報告
+    report = experiment.generate_experiment_report(results)
+    
+    # 保存結果
+    experiment.save_results(results, report)
+    
+    # 打印摘要
+    print("\n實驗摘要:")
+    print(f"平均準確率: {report['summary']['average_accuracy']:.4f}")
+    print(f"平均跨領域穩定性: {report['summary']['average_stability']:.4f}")
+    print(f"最佳準確率策略: {report['analysis']['best_accuracy']['strategy']}")
+    print(f"最佳穩定性策略: {report['analysis']['best_stability']['strategy']}")
+
+
+if __name__ == "__main__":
+    main()

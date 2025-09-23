@@ -13,7 +13,7 @@ from pathlib import Path
 class ConfigManager:
     """實驗配置管理器"""
     
-    def __init__(self, config_dir: str = "experiments/configs"):
+    def __init__(self, config_dir: str = "configs"):
         """
         初始化配置管理器
         

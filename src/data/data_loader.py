@@ -405,8 +405,8 @@ class DatasetManager:
             base_data_dir: 基礎數據目錄
         """
         self.base_data_dir = Path(base_data_dir)
-        self.semeval2014_loader = SemEval2014Loader(self.base_data_dir / 'semeval2014')
-        self.semeval2016_loader = SemEval2016Loader(self.base_data_dir / 'semeval2016')
+        self.semeval2014_loader = SemEval2014Loader(self.base_data_dir / 'raw' / 'SemEval-2014')
+        self.semeval2016_loader = SemEval2016Loader(self.base_data_dir / 'raw' / 'SemEval-2016')
         self.custom_loader = CustomDataLoader()
     
     def load_dataset(self, dataset_name: str, domain: str = None, 
@@ -491,3 +491,42 @@ class DatasetManager:
             'average_text_length': avg_text_length,
             'text_length_range': (min(text_lengths), max(text_lengths)) if text_lengths else (0, 0)
         }
+    
+    def load_all_datasets(self) -> Dict[str, Dict[str, List[AspectSentiment]]]:
+        """
+        載入所有可用的數據集
+        
+        Returns:
+            包含所有數據集的字典，格式為：
+            {
+                'semeval2014': {
+                    'restaurants': {'train': [...], 'test': [...]},
+                    'laptops': {'train': [...], 'test': [...]}
+                },
+                'semeval2016': {
+                    'restaurants': {'train': [...], 'test': [...]},
+                    'laptops': {'train': [...], 'test': [...]}
+                }
+            }
+        """
+        all_datasets = {}
+        
+        try:
+            # 載入 SemEval-2014 數據
+            semeval2014_data = self.semeval2014_loader.load_all_data()
+            if semeval2014_data:
+                all_datasets['semeval2014'] = semeval2014_data
+                
+        except Exception as e:
+            print(f"載入 SemEval-2014 數據失敗: {str(e)}")
+        
+        try:
+            # 載入 SemEval-2016 數據
+            semeval2016_data = self.semeval2016_loader.load_all_data()
+            if semeval2016_data:
+                all_datasets['semeval2016'] = semeval2016_data
+                
+        except Exception as e:
+            print(f"載入 SemEval-2016 數據失敗: {str(e)}")
+        
+        return all_datasets

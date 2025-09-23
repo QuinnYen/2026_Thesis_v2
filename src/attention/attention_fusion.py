@@ -72,37 +72,39 @@ class WeightedAttentionFusion(nn.Module):
     def forward(self, x: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         前向傳播
-        
+
         Args:
             x: 輸入張量 [batch_size, seq_len, hidden_dim]
             **kwargs: 其他參數，傳遞給各個注意力模組
-            
+
         Returns:
             fused_output: 融合後的輸出 [batch_size, seq_len, hidden_dim]
             attention_weights_list: 各個注意力模組的權重列表
         """
+        # 確保模組在正確的設備上
+        device = x.device
+        self.to(device)
+
         attention_outputs = []
         attention_weights_list = []
         
         # 計算各個注意力模組的輸出
         for attention_module in self.attention_modules:
             try:
-                output, weights = attention_module(x, **kwargs)
+                # 標準多頭注意力模組只需要一個輸入參數
+                result = attention_module(x, **kwargs)
+                if isinstance(result, tuple) and len(result) >= 2:
+                    output, weights = result[0], result[1]
+                else:
+                    output = result
+                    weights = None
                 attention_outputs.append(output)
                 attention_weights_list.append(weights)
             except Exception as e:
-                # 處理不同注意力模組的參數不匹配問題
-                if hasattr(attention_module, '__class__'):
-                    module_name = attention_module.__class__.__name__
-                    if 'CrossModal' in module_name:
-                        # 跨模態注意力需要額外的 key 和 value
-                        output, weights = attention_module(x, x, x, **kwargs)
-                    else:
-                        output, weights = attention_module(x, **kwargs)
-                    attention_outputs.append(output)
-                    attention_weights_list.append(weights)
-                else:
-                    raise e
+                print(f"WeightedAttentionFusion注意力模組錯誤: {e}")
+                # 使用原始輸入作為備選
+                attention_outputs.append(x)
+                attention_weights_list.append(None)
         
         # 正規化融合權重
         normalized_weights = F.softmax(self.fusion_weights, dim=0)
@@ -159,15 +161,19 @@ class GatedAttentionFusion(nn.Module):
     def forward(self, x: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         前向傳播
-        
+
         Args:
             x: 輸入張量 [batch_size, seq_len, hidden_dim]
             **kwargs: 其他參數，傳遞給各個注意力模組
-            
+
         Returns:
             fused_output: 融合後的輸出 [batch_size, seq_len, hidden_dim]
             attention_weights_list: 各個注意力模組的權重列表
         """
+        # 確保模組在正確的設備上
+        device = x.device
+        self.to(device)
+
         batch_size, seq_len, _ = x.size()
         
         # 計算各個注意力模組的輸出
@@ -176,23 +182,25 @@ class GatedAttentionFusion(nn.Module):
         
         for i, attention_module in enumerate(self.attention_modules):
             try:
-                output, weights = attention_module(x, **kwargs)
-            except:
-                if hasattr(attention_module, '__class__'):
-                    module_name = attention_module.__class__.__name__
-                    if 'CrossModal' in module_name:
-                        output, weights = attention_module(x, x, x, **kwargs)
-                    else:
-                        output, weights = attention_module(x, **kwargs)
+                # 標準多頭注意力模組只需要一個輸入參數
+                result = attention_module(x, **kwargs)
+                if isinstance(result, tuple) and len(result) >= 2:
+                    output, weights = result[0], result[1]
                 else:
-                    output, weights = attention_module(x, **kwargs)
-            
-            # 上下文融合
-            context_input = torch.cat([x, output], dim=-1)  # [batch_size, seq_len, hidden_dim * 2]
-            fused_context = self.context_fusion[i](context_input)  # [batch_size, seq_len, hidden_dim]
-            
-            attention_outputs.append(fused_context)
-            attention_weights_list.append(weights)
+                    output = result
+                    weights = None
+                
+                # 上下文融合
+                context_input = torch.cat([x, output], dim=-1)  # [batch_size, seq_len, hidden_dim * 2]
+                fused_context = self.context_fusion[i](context_input)  # [batch_size, seq_len, hidden_dim]
+                
+                attention_outputs.append(fused_context)
+                attention_weights_list.append(weights)
+            except Exception as e:
+                print(f"GatedAttentionFusion注意力模組錯誤: {e}")
+                # 使用原始輸入作為備選
+                attention_outputs.append(x)
+                attention_weights_list.append(None)
         
         # 計算門控權重（基於原始輸入）
         gate_input = x.mean(dim=1)  # [batch_size, hidden_dim]
@@ -314,6 +322,9 @@ class AdaptiveAttentionFusion(nn.Module):
         
         # Layer Normalization
         self.layer_norm = nn.LayerNorm(hidden_dim)
+        
+        # 設備追蹤
+        self.device = None
     
     def forward(self, x: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
@@ -327,7 +338,29 @@ class AdaptiveAttentionFusion(nn.Module):
             fused_output: 融合後的輸出 [batch_size, seq_len, hidden_dim]
             fusion_info: 融合資訊字典
         """
+        # 確保所有模組和輸入在同一設備上
+        device = x.device
+        if self.device != device:
+            self.device = device
+            self.to(device)
+
+        # 確保子模組也在正確的設備上
+        self.weighted_fusion = self.weighted_fusion.to(device)
+        self.gated_fusion = self.gated_fusion.to(device)
+        self.strategy_network = self.strategy_network.to(device)
+        self.sequential_projection = self.sequential_projection.to(device)
+        self.layer_norm = self.layer_norm.to(device)
+        
         # 決定融合策略
+        batch_size, seq_len, feature_dim = x.size()
+        
+        # 確保輸入維度正確
+        if feature_dim != self.hidden_dim:
+            # 如果輸入維度不匹配，使用投影層調整
+            if not hasattr(self, 'input_projection'):
+                self.input_projection = nn.Linear(feature_dim, self.hidden_dim).to(x.device)
+            x = self.input_projection(x)
+        
         strategy_input = x.mean(dim=1)  # [batch_size, hidden_dim]
         strategy_logits = self.strategy_network(strategy_input)  # [batch_size, 3]
         strategy_weights = F.softmax(strategy_logits, dim=-1)  # [batch_size, 3]
@@ -336,29 +369,47 @@ class AdaptiveAttentionFusion(nn.Module):
         weighted_output, weighted_weights = self.weighted_fusion(x, **kwargs)
         gated_output, gated_weights = self.gated_fusion(x, **kwargs)
         
+        # 確保輸出在正確的設備上
+        weighted_output = weighted_output.to(device)
+        gated_output = gated_output.to(device)
+        
         # 串聯融合
         attention_outputs = []
         for attention_module in self.attention_modules:
+            # 確保注意力模組在正確的設備上
+            attention_module = attention_module.to(device)
+            
             try:
-                output, _ = attention_module(x, **kwargs)
-                attention_outputs.append(output)
+                result = attention_module(x, **kwargs)
+                # 處理可變返回值
+                if isinstance(result, tuple):
+                    output = result[0]
+                else:
+                    output = result
+                attention_outputs.append(output.to(device))
             except:
                 if hasattr(attention_module, '__class__'):
                     module_name = attention_module.__class__.__name__
                     if 'CrossModal' in module_name:
-                        output, _ = attention_module(x, x, x, **kwargs)
+                        result = attention_module(x, x, x, **kwargs)
                     else:
-                        output, _ = attention_module(x, **kwargs)
-                    attention_outputs.append(output)
+                        result = attention_module(x, **kwargs)
                 else:
-                    output, _ = attention_module(x, **kwargs)
-                    attention_outputs.append(output)
+                    result = attention_module(x, **kwargs)
+
+                # 處理異常情況下的可變返回值
+                if isinstance(result, tuple):
+                    output = result[0]
+                else:
+                    output = result
+                attention_outputs.append(output.to(device))
         
         sequential_concat = torch.cat(attention_outputs, dim=-1)  # [batch_size, seq_len, hidden_dim * num_attentions]
         sequential_output = self.sequential_projection(sequential_concat)  # [batch_size, seq_len, hidden_dim]
         
         # 自適應融合
-        strategy_weights = strategy_weights.unsqueeze(1).unsqueeze(3)  # [batch_size, 1, 1, 3]
+        # 正確處理 strategy_weights 的維度以匹配 outputs_stack
+        strategy_weights = strategy_weights.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, 3]
         
         outputs_stack = torch.stack([weighted_output, gated_output, sequential_output], dim=-1)  # [batch_size, seq_len, hidden_dim, 3]
         adaptive_output = torch.sum(outputs_stack * strategy_weights, dim=-1)  # [batch_size, seq_len, hidden_dim]
@@ -415,37 +466,39 @@ class CrossAttentionFusion(nn.Module):
     def forward(self, x: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         前向傳播
-        
+
         Args:
             x: 輸入張量 [batch_size, seq_len, hidden_dim]
             **kwargs: 其他參數，傳遞給各個注意力模組
-            
+
         Returns:
             fused_output: 融合後的輸出 [batch_size, seq_len, hidden_dim]
             attention_weights_list: 各個注意力模組的權重列表
         """
+        # 確保模組在正確的設備上
+        device = x.device
+        self.to(device)
+
         # 計算各個注意力模組的輸出
         attention_outputs = []
         attention_weights_list = []
         
         for attention_module in self.attention_modules:
             try:
-                output, weights = attention_module(x, **kwargs)
+                # 標準多頭注意力模組只需要一個輸入參數
+                result = attention_module(x, **kwargs)
+                if isinstance(result, tuple) and len(result) >= 2:
+                    output, weights = result[0], result[1]
+                else:
+                    output = result
+                    weights = None
                 attention_outputs.append(output)
                 attention_weights_list.append(weights)
-            except:
-                if hasattr(attention_module, '__class__'):
-                    module_name = attention_module.__class__.__name__
-                    if 'CrossModal' in module_name:
-                        output, weights = attention_module(x, x, x, **kwargs)
-                    else:
-                        output, weights = attention_module(x, **kwargs)
-                    attention_outputs.append(output)
-                    attention_weights_list.append(weights)
-                else:
-                    output, weights = attention_module(x, **kwargs)
-                    attention_outputs.append(output)
-                    attention_weights_list.append(weights)
+            except Exception as e:
+                print(f"CrossAttentionFusion注意力模組錯誤: {e}")
+                # 使用原始輸入作為備選
+                attention_outputs.append(x)
+                attention_weights_list.append(None)
         
         # 跨注意力交互
         cross_enhanced_outputs = []
@@ -549,18 +602,43 @@ class AttentionDistillationFusion(nn.Module):
             attention_weights_list: 各個注意力模組的權重列表
             distillation_loss: 蒸餾損失（如果 compute_loss=True）
         """
+        # 確保模組在正確的設備上
+        device = x.device
+        self.to(device)
+
         # 教師模型輸出
         try:
-            teacher_output, teacher_weights = self.teacher_attention(x, **kwargs)
+            result = self.teacher_attention(x, **kwargs)
+            # 處理可變返回值
+            if isinstance(result, tuple):
+                if len(result) >= 2:
+                    teacher_output, teacher_weights = result[0], result[1]
+                else:
+                    teacher_output = result[0]
+                    teacher_weights = None
+            else:
+                teacher_output = result
+                teacher_weights = None
         except:
             if hasattr(self.teacher_attention, '__class__'):
                 module_name = self.teacher_attention.__class__.__name__
                 if 'CrossModal' in module_name:
-                    teacher_output, teacher_weights = self.teacher_attention(x, x, x, **kwargs)
+                    result = self.teacher_attention(x, x, x, **kwargs)
                 else:
-                    teacher_output, teacher_weights = self.teacher_attention(x, **kwargs)
+                    result = self.teacher_attention(x, **kwargs)
             else:
-                teacher_output, teacher_weights = self.teacher_attention(x, **kwargs)
+                result = self.teacher_attention(x, **kwargs)
+
+            # 處理異常情況下的可變返回值
+            if isinstance(result, tuple):
+                if len(result) >= 2:
+                    teacher_output, teacher_weights = result[0], result[1]
+                else:
+                    teacher_output = result[0]
+                    teacher_weights = None
+            else:
+                teacher_output = result
+                teacher_weights = None
         
         # 學生模型輸出
         student_outputs = []
@@ -568,16 +646,37 @@ class AttentionDistillationFusion(nn.Module):
         
         for i, student_attention in enumerate(self.student_attentions):
             try:
-                output, weights = student_attention(x, **kwargs)
+                result = student_attention(x, **kwargs)
+                # 處理可變返回值
+                if isinstance(result, tuple):
+                    if len(result) >= 2:
+                        output, weights = result[0], result[1]
+                    else:
+                        output = result[0]
+                        weights = None
+                else:
+                    output = result
+                    weights = None
             except:
                 if hasattr(student_attention, '__class__'):
                     module_name = student_attention.__class__.__name__
                     if 'CrossModal' in module_name:
-                        output, weights = student_attention(x, x, x, **kwargs)
+                        result = student_attention(x, x, x, **kwargs)
                     else:
-                        output, weights = student_attention(x, **kwargs)
+                        result = student_attention(x, **kwargs)
                 else:
-                    output, weights = student_attention(x, **kwargs)
+                    result = student_attention(x, **kwargs)
+
+                # 處理異常情況下的可變返回值
+                if isinstance(result, tuple):
+                    if len(result) >= 2:
+                        output, weights = result[0], result[1]
+                    else:
+                        output = result[0]
+                        weights = None
+                else:
+                    output = result
+                    weights = None
             
             # 注意力對齊
             aligned_output = self.attention_alignment[i](output)

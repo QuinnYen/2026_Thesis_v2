@@ -132,6 +132,7 @@ class AspectAwareAttention(nn.Module):
     def __init__(self, 
                  input_dim: int,
                  aspect_dim: int = 128,
+                 max_aspect_len: int = 10,
                  dropout_rate: float = 0.1):
         """
         初始化方面詞感知注意力
@@ -139,12 +140,14 @@ class AspectAwareAttention(nn.Module):
         Args:
             input_dim: 輸入特徵維度
             aspect_dim: 方面詞嵌入維度
+            max_aspect_len: 方面詞的最大長度（基於數據集統計確定）
             dropout_rate: Dropout比率
         """
         super(AspectAwareAttention, self).__init__()
         
         self.input_dim = input_dim
         self.aspect_dim = aspect_dim
+        self.max_aspect_len = max_aspect_len
         self.dropout = nn.Dropout(dropout_rate)
         
         # 方面詞投影層
@@ -230,7 +233,7 @@ class AspectAwareAttention(nn.Module):
             方面詞特徵 [batch_size, max_aspect_len, input_dim]
         """
         batch_size, seq_len, input_dim = features.size()
-        max_aspect_len = 10  # 假設方面詞最大長度為10
+        max_aspect_len = self.max_aspect_len  # 使用配置的方面詞最大長度
         
         aspect_features = torch.zeros(batch_size, max_aspect_len, input_dim, device=features.device)
         

@@ -198,7 +198,6 @@ data/cache/
 # 實驗和輸出
 # ===========================================
 # 實驗結果
-experiments/
 outputs/
 results/
 reports/
