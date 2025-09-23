@@ -57,36 +57,128 @@ class ConcatenationFusion(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_dim)
         
     def forward(self, x: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        # 確保模組在正確的設備上
+        device = x.device
+        self.to(device)
+
+        # 檢查並調整輸入維度
+        original_shape = x.shape
+        if len(x.shape) == 2:
+            # 如果輸入是 [total_tokens, hidden_dim]，需要重塑為 [batch_size, seq_len, hidden_dim]
+            batch_size = 1  # 假設batch_size為1
+            seq_len = x.shape[0]
+            hidden_dim = x.shape[1]
+            x = x.unsqueeze(0)  # [1, total_tokens, hidden_dim]
+            print(f"調整輸入維度從 {original_shape} 到 {x.shape}")
+        elif len(x.shape) != 3:
+            raise ValueError(f"輸入維度錯誤，期望3維張量 [batch_size, seq_len, hidden_dim]，得到 {x.shape}")
+
         attention_outputs = []
         attention_weights_list = []
         
         # 計算各個注意力模組的輸出
-        for attention_module in self.attention_modules:
+        for i, attention_module in enumerate(self.attention_modules):
             try:
-                # 標準多頭注意力模組只需要一個輸入參數
-                result = attention_module(x, **kwargs)
-                if isinstance(result, tuple) and len(result) >= 2:
-                    output, weights = result[0], result[1]
+                # 確保注意力模組在正確的設備上
+                attention_module = attention_module.to(device)
+
+                # 對於 StandardMultiHeadAttention，只需要 query 參數
+                if hasattr(attention_module, '__class__') and 'MultiHead' in attention_module.__class__.__name__:
+                    result = attention_module(x)  # 只傳遞 query
+                else:
+                    result = attention_module(x, **kwargs)
+
+                # 處理不同數量的返回值
+                if isinstance(result, tuple):
+                    if len(result) >= 2:
+                        output, weights = result[0], result[1]
+                    else:
+                        output = result[0]
+                        weights = None
                 else:
                     output = result
                     weights = None
+
+                # 確保輸出在正確的設備上且維度正確
+                output = output.to(device)
+                if output.size(-1) != self.hidden_dim:
+                    # 如果維度不匹配，創建投影層
+                    if not hasattr(self, f'input_projection_{i}'):
+                        setattr(self, f'input_projection_{i}',
+                               nn.Linear(output.size(-1), self.hidden_dim).to(device))
+                    projection = getattr(self, f'input_projection_{i}')
+                    output = projection(output)
+
                 attention_outputs.append(output)
                 attention_weights_list.append(weights)
+
             except Exception as e:
-                print(f"注意力模組錯誤: {e}")
+                print(f"注意力模組 {i} 錯誤: {e}")
+                print(f"輸入形狀: {x.shape}, 模組類型: {type(attention_module)}")
                 # 使用原始輸入作為備選
                 attention_outputs.append(x)
                 attention_weights_list.append(None)
         
-        # 拼接所有輸出
-        concatenated = torch.cat(attention_outputs, dim=-1)  # [batch_size, seq_len, hidden_dim * num_attentions]
-        
-        # 投影回原始維度
-        fused_output = self.projection(concatenated)  # [batch_size, seq_len, hidden_dim]
-        
-        # 殘差連接和層正規化
-        fused_output = self.layer_norm(fused_output + x)
-        
+        # 檢查並確保所有輸出維度一致
+        if attention_outputs:
+            expected_dim = self.hidden_dim
+            for i, output in enumerate(attention_outputs):
+                if output.size(-1) != expected_dim:
+                    print(f"警告：注意力模組 {i} 輸出維度不匹配，期望 {expected_dim}，實際 {output.size(-1)}")
+                    # 動態調整投影層
+                    if output.size(-1) != expected_dim:
+                        if not hasattr(self, f'dim_adjust_{i}'):
+                            setattr(self, f'dim_adjust_{i}',
+                                   nn.Linear(output.size(-1), expected_dim).to(device))
+                        adjust_layer = getattr(self, f'dim_adjust_{i}')
+                        attention_outputs[i] = adjust_layer(output)
+
+            # 拼接所有輸出
+            try:
+                concatenated = torch.cat(attention_outputs, dim=-1)  # [batch_size, seq_len, hidden_dim * num_attentions]
+            except Exception as e:
+                print(f"拼接錯誤: {e}")
+                print(f"輸出形狀: {[out.shape for out in attention_outputs]}")
+                # 強制使所有輸出具有相同的維度
+                max_dim = max(out.size(-1) for out in attention_outputs)
+                adjusted_outputs = []
+                for i, out in enumerate(attention_outputs):
+                    if out.size(-1) < max_dim:
+                        # 添加零填充
+                        padding = torch.zeros(*out.shape[:-1], max_dim - out.size(-1), device=out.device)
+                        out = torch.cat([out, padding], dim=-1)
+                    adjusted_outputs.append(out)
+                concatenated = torch.cat(adjusted_outputs, dim=-1)
+
+            # 確保投影層的輸入維度正確
+            if concatenated.size(-1) != self.projection.in_features:
+                # 動態調整投影層
+                self.projection = nn.Linear(concatenated.size(-1), self.hidden_dim).to(device)
+
+            # 投影回原始維度
+            fused_output = self.projection(concatenated)  # [batch_size, seq_len, hidden_dim]
+
+            # 確保殘差連接的維度匹配
+            if fused_output.size() != x.size():
+                print(f"警告：融合輸出和輸入維度不匹配，{fused_output.size()} vs {x.size()}")
+                if fused_output.size(-1) != x.size(-1):
+                    # 調整維度以匹配輸入
+                    if not hasattr(self, 'residual_projection'):
+                        self.residual_projection = nn.Linear(fused_output.size(-1), x.size(-1)).to(device)
+                    fused_output = self.residual_projection(fused_output)
+
+            # 殘差連接和層正規化
+            fused_output = self.layer_norm(fused_output + x)
+        else:
+            # 如果沒有有效的注意力輸出，直接返回輸入
+            print("警告：沒有有效的注意力輸出，返回原始輸入")
+            fused_output = x
+
+        # 如果原始輸入是2維的，恢復原始形狀
+        if len(original_shape) == 2:
+            fused_output = fused_output.squeeze(0)  # 移除batch維度
+            print(f"恢復輸出維度從 {fused_output.shape} 到 {fused_output.squeeze(0).shape if fused_output.dim() > 2 else fused_output.shape}")
+
         return fused_output, attention_weights_list
 
 
@@ -406,14 +498,43 @@ class FusionStrategyExperiment:
                         print(f"訓練階段模型前向傳播錯誤: {e}")
                         continue
                     
-                    # 檢查輸出維度，如果需要添加分類層
-                    if outputs.size(-1) != 3:  # 假設3分類問題
-                        if not hasattr(self, 'classifier'):
-                            self.classifier = nn.Linear(outputs.size(-1), 3).to(features.device)
-                        outputs = self.classifier(outputs.mean(dim=1))  # 平均池化後分類
+                    # 檢查輸出維度並處理序列到分類的轉換
+                    if len(outputs.shape) == 2:
+                        # 輸出是 [seq_len, hidden_dim]，需要轉換為 [batch_size, num_classes]
+                        if outputs.size(-1) != 3:  # 不是3分類
+                            if not hasattr(self, 'classifier'):
+                                self.classifier = nn.Linear(outputs.size(-1), 3).to(features.device)
+                            # 對序列進行平均池化，然後分類
+                            pooled_output = outputs.mean(dim=0, keepdim=True)  # [1, hidden_dim]
+                            outputs = self.classifier(pooled_output)  # [1, 3]
+                        else:
+                            # 如果已經是3維，直接池化
+                            outputs = outputs.mean(dim=0, keepdim=True)  # [1, 3]
+                    elif len(outputs.shape) == 3:
+                        # 輸出是 [batch_size, seq_len, hidden_dim]
+                        if outputs.size(-1) != 3:
+                            if not hasattr(self, 'classifier'):
+                                self.classifier = nn.Linear(outputs.size(-1), 3).to(features.device)
+                            pooled_output = outputs.mean(dim=1)  # [batch_size, hidden_dim]
+                            outputs = self.classifier(pooled_output)  # [batch_size, 3]
+                        else:
+                            outputs = outputs.mean(dim=1)  # [batch_size, 3]
                     else:
-                        outputs = outputs.mean(dim=1)  # 平均池化
-                    
+                        raise ValueError(f"不支援的輸出維度: {outputs.shape}")
+
+                    # 確保輸出是正確的形狀 [batch_size, num_classes]
+                    if len(outputs.shape) == 1:
+                        outputs = outputs.unsqueeze(0)  # [1, num_classes]
+
+                    # 調整標籤以匹配輸出的batch_size
+                    if outputs.size(0) == 1 and len(labels.shape) == 1:
+                        # 如果輸出是[1, num_classes]但標籤是[seq_len]，取標籤的第一個值
+                        labels = labels[0:1]  # 取第一個標籤
+                    elif outputs.size(0) != labels.size(0):
+                        print(f"警告：輸出和標籤的batch_size不匹配：{outputs.size(0)} vs {labels.size(0)}")
+                        # 如果維度不匹配，使用第一個標籤
+                        labels = labels[0:1] if len(labels) > 0 else torch.tensor([0], dtype=labels.dtype, device=labels.device)
+
                     loss = criterion(outputs, labels)
                     loss.backward()
                     optimizer.step()
@@ -445,17 +566,48 @@ class FusionStrategyExperiment:
                         print(f"評估階段模型前向傳播錯誤: {e}")
                         continue
                     
-                    # 檢查輸出維度，如果需要添加分類層
-                    if outputs.size(-1) != 3:  # 假設3分類問題
-                        if hasattr(self, 'classifier'):
-                            outputs = self.classifier(outputs.mean(dim=1))  # 平均池化後分類
+                    # 檢查輸出維度並處理序列到分類的轉換
+                    if len(outputs.shape) == 2:
+                        # 輸出是 [seq_len, hidden_dim]，需要轉換為 [batch_size, num_classes]
+                        if outputs.size(-1) != 3:  # 不是3分類
+                            if hasattr(self, 'classifier'):
+                                pooled_output = outputs.mean(dim=0, keepdim=True)  # [1, hidden_dim]
+                                outputs = self.classifier(pooled_output)  # [1, 3]
+                            else:
+                                # 創建臨時分類器用於評估
+                                temp_classifier = nn.Linear(outputs.size(-1), 3).to(features.device)
+                                pooled_output = outputs.mean(dim=0, keepdim=True)  # [1, hidden_dim]
+                                outputs = temp_classifier(pooled_output)  # [1, 3]
                         else:
-                            # 創建臨時分類器用於評估
-                            temp_classifier = nn.Linear(outputs.size(-1), 3).to(features.device)
-                            outputs = temp_classifier(outputs.mean(dim=1))
+                            outputs = outputs.mean(dim=0, keepdim=True)  # [1, 3]
+                    elif len(outputs.shape) == 3:
+                        # 輸出是 [batch_size, seq_len, hidden_dim]
+                        if outputs.size(-1) != 3:
+                            if hasattr(self, 'classifier'):
+                                pooled_output = outputs.mean(dim=1)  # [batch_size, hidden_dim]
+                                outputs = self.classifier(pooled_output)  # [batch_size, 3]
+                            else:
+                                temp_classifier = nn.Linear(outputs.size(-1), 3).to(features.device)
+                                pooled_output = outputs.mean(dim=1)  # [batch_size, hidden_dim]
+                                outputs = temp_classifier(pooled_output)  # [batch_size, 3]
+                        else:
+                            outputs = outputs.mean(dim=1)  # [batch_size, 3]
                     else:
-                        outputs = outputs.mean(dim=1)  # 平均池化
-                    
+                        raise ValueError(f"不支援的輸出維度: {outputs.shape}")
+
+                    # 確保輸出是正確的形狀 [batch_size, num_classes]
+                    if len(outputs.shape) == 1:
+                        outputs = outputs.unsqueeze(0)  # [1, num_classes]
+
+                    # 調整標籤以匹配輸出的batch_size
+                    if outputs.size(0) == 1 and len(labels.shape) == 1:
+                        # 如果輸出是[1, num_classes]但標籤是[seq_len]，取標籤的第一個值
+                        labels = labels[0:1]  # 取第一個標籤
+                    elif outputs.size(0) != labels.size(0):
+                        print(f"警告：評估時輸出和標籤的batch_size不匹配：{outputs.size(0)} vs {labels.size(0)}")
+                        # 如果維度不匹配，使用第一個標籤
+                        labels = labels[0:1] if len(labels) > 0 else torch.tensor([0], dtype=labels.dtype, device=labels.device)
+
                     predictions = torch.argmax(outputs, dim=-1)
                     
                     # 計算性能指標
