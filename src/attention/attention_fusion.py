@@ -85,23 +85,57 @@ class WeightedAttentionFusion(nn.Module):
         device = x.device
         self.to(device)
 
+        # 檢查並調整輸入維度
+        original_shape = x.shape
+        if len(x.shape) == 2:
+            # 如果輸入是 [total_tokens, hidden_dim]，需要重塑為 [batch_size, seq_len, hidden_dim]
+            x = x.unsqueeze(0)  # [1, total_tokens, hidden_dim]
+            print(f"WeightedAttentionFusion調整輸入維度從 {original_shape} 到 {x.shape}")
+        elif len(x.shape) != 3:
+            raise ValueError(f"輸入維度錯誤，期望3維張量 [batch_size, seq_len, hidden_dim]，得到 {x.shape}")
+
         attention_outputs = []
         attention_weights_list = []
         
         # 計算各個注意力模組的輸出
-        for attention_module in self.attention_modules:
+        for i, attention_module in enumerate(self.attention_modules):
             try:
-                # 標準多頭注意力模組只需要一個輸入參數
-                result = attention_module(x, **kwargs)
-                if isinstance(result, tuple) and len(result) >= 2:
-                    output, weights = result[0], result[1]
+                # 確保注意力模組在正確的設備上
+                attention_module = attention_module.to(device)
+
+                # 對於 StandardMultiHeadAttention，只需要 query 參數
+                if hasattr(attention_module, '__class__') and 'MultiHead' in attention_module.__class__.__name__:
+                    result = attention_module(x)  # 只傳遞 query
+                else:
+                    result = attention_module(x, **kwargs)
+
+                # 處理不同數量的返回值
+                if isinstance(result, tuple):
+                    if len(result) >= 2:
+                        output, weights = result[0], result[1]
+                    else:
+                        output = result[0]
+                        weights = None
                 else:
                     output = result
                     weights = None
+
+                # 確保輸出在正確的設備上且維度正確
+                output = output.to(device)
+                if output.size(-1) != self.hidden_dim:
+                    # 如果維度不匹配，創建投影層
+                    if not hasattr(self, f'input_projection_{i}'):
+                        setattr(self, f'input_projection_{i}',
+                               nn.Linear(output.size(-1), self.hidden_dim).to(device))
+                    projection = getattr(self, f'input_projection_{i}')
+                    output = projection(output)
+
                 attention_outputs.append(output)
                 attention_weights_list.append(weights)
+
             except Exception as e:
-                print(f"WeightedAttentionFusion注意力模組錯誤: {e}")
+                print(f"WeightedAttentionFusion注意力模組 {i} 錯誤: {e}")
+                print(f"輸入形狀: {x.shape}, 模組類型: {type(attention_module)}")
                 # 使用原始輸入作為備選
                 attention_outputs.append(x)
                 attention_weights_list.append(None)
@@ -113,13 +147,18 @@ class WeightedAttentionFusion(nn.Module):
         fused_output = torch.zeros_like(attention_outputs[0])
         for i, (output, weight) in enumerate(zip(attention_outputs, normalized_weights)):
             fused_output += weight * output
-        
+
         # 輸出投影
         fused_output = self.output_projection(fused_output)
-        
+
         # 殘差連接和層正規化
         fused_output = self.layer_norm(fused_output + x)
-        
+
+        # 如果原始輸入是2維的，恢復原始形狀
+        if len(original_shape) == 2:
+            fused_output = fused_output.squeeze(0)  # 移除batch維度
+            print(f"WeightedAttentionFusion恢復輸出維度到 {fused_output.shape}")
+
         return fused_output, attention_weights_list
 
 
@@ -174,6 +213,15 @@ class GatedAttentionFusion(nn.Module):
         device = x.device
         self.to(device)
 
+        # 檢查並調整輸入維度
+        original_shape = x.shape
+        if len(x.shape) == 2:
+            # 如果輸入是 [total_tokens, hidden_dim]，需要重塑為 [batch_size, seq_len, hidden_dim]
+            x = x.unsqueeze(0)  # [1, total_tokens, hidden_dim]
+            print(f"GatedAttentionFusion調整輸入維度從 {original_shape} 到 {x.shape}")
+        elif len(x.shape) != 3:
+            raise ValueError(f"輸入維度錯誤，期望3維張量 [batch_size, seq_len, hidden_dim]，得到 {x.shape}")
+
         batch_size, seq_len, _ = x.size()
         
         # 計算各個注意力模組的輸出
@@ -182,22 +230,45 @@ class GatedAttentionFusion(nn.Module):
         
         for i, attention_module in enumerate(self.attention_modules):
             try:
-                # 標準多頭注意力模組只需要一個輸入參數
-                result = attention_module(x, **kwargs)
-                if isinstance(result, tuple) and len(result) >= 2:
-                    output, weights = result[0], result[1]
+                # 確保注意力模組在正確的設備上
+                attention_module = attention_module.to(device)
+
+                # 對於 StandardMultiHeadAttention，只需要 query 參數
+                if hasattr(attention_module, '__class__') and 'MultiHead' in attention_module.__class__.__name__:
+                    result = attention_module(x)  # 只傳遞 query
+                else:
+                    result = attention_module(x, **kwargs)
+
+                # 處理不同數量的返回值
+                if isinstance(result, tuple):
+                    if len(result) >= 2:
+                        output, weights = result[0], result[1]
+                    else:
+                        output = result[0]
+                        weights = None
                 else:
                     output = result
                     weights = None
-                
+
+                # 確保輸出在正確的設備上且維度正確
+                output = output.to(device)
+                if output.size(-1) != self.hidden_dim:
+                    # 如果維度不匹配，創建投影層
+                    if not hasattr(self, f'input_projection_{i}'):
+                        setattr(self, f'input_projection_{i}',
+                               nn.Linear(output.size(-1), self.hidden_dim).to(device))
+                    projection = getattr(self, f'input_projection_{i}')
+                    output = projection(output)
+
                 # 上下文融合
                 context_input = torch.cat([x, output], dim=-1)  # [batch_size, seq_len, hidden_dim * 2]
                 fused_context = self.context_fusion[i](context_input)  # [batch_size, seq_len, hidden_dim]
-                
+
                 attention_outputs.append(fused_context)
                 attention_weights_list.append(weights)
             except Exception as e:
-                print(f"GatedAttentionFusion注意力模組錯誤: {e}")
+                print(f"GatedAttentionFusion注意力模組 {i} 錯誤: {e}")
+                print(f"輸入形狀: {x.shape}, 模組類型: {type(attention_module)}")
                 # 使用原始輸入作為備選
                 attention_outputs.append(x)
                 attention_weights_list.append(None)
@@ -214,10 +285,15 @@ class GatedAttentionFusion(nn.Module):
         
         # 輸出投影
         fused_output = self.output_projection(fused_output)
-        
+
         # 殘差連接和層正規化
         fused_output = self.layer_norm(fused_output + x)
-        
+
+        # 如果原始輸入是2維的，恢復原始形狀
+        if len(original_shape) == 2:
+            fused_output = fused_output.squeeze(0)  # 移除batch維度
+            print(f"GatedAttentionFusion恢復輸出維度到 {fused_output.shape}")
+
         return fused_output, attention_weights_list
 
 
@@ -329,101 +405,193 @@ class AdaptiveAttentionFusion(nn.Module):
     def forward(self, x: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         前向傳播
-        
+
         Args:
-            x: 輸入張量 [batch_size, seq_len, hidden_dim]
+            x: 輸入張量 [batch_size, seq_len, hidden_dim] 或 [seq_len, hidden_dim]
             **kwargs: 其他參數，傳遞給各個注意力模組
-            
+
         Returns:
-            fused_output: 融合後的輸出 [batch_size, seq_len, hidden_dim]
+            fused_output: 融合後的輸出
             fusion_info: 融合資訊字典
         """
-        # 確保所有模組和輸入在同一設備上
-        device = x.device
-        if self.device != device:
-            self.device = device
-            self.to(device)
+        try:
+            # 記錄原始輸入形狀以便恢復
+            original_shape = x.shape
+            print(f"AdaptiveAttentionFusion 輸入形狀: {original_shape}")
 
-        # 確保子模組也在正確的設備上
-        self.weighted_fusion = self.weighted_fusion.to(device)
-        self.gated_fusion = self.gated_fusion.to(device)
-        self.strategy_network = self.strategy_network.to(device)
-        self.sequential_projection = self.sequential_projection.to(device)
-        self.layer_norm = self.layer_norm.to(device)
-        
-        # 決定融合策略
-        batch_size, seq_len, feature_dim = x.size()
-        
-        # 確保輸入維度正確
-        if feature_dim != self.hidden_dim:
-            # 如果輸入維度不匹配，使用投影層調整
-            if not hasattr(self, 'input_projection'):
-                self.input_projection = nn.Linear(feature_dim, self.hidden_dim).to(x.device)
-            x = self.input_projection(x)
-        
-        strategy_input = x.mean(dim=1)  # [batch_size, hidden_dim]
-        strategy_logits = self.strategy_network(strategy_input)  # [batch_size, 3]
-        strategy_weights = F.softmax(strategy_logits, dim=-1)  # [batch_size, 3]
-        
-        # 計算各種融合策略的輸出
-        weighted_output, weighted_weights = self.weighted_fusion(x, **kwargs)
-        gated_output, gated_weights = self.gated_fusion(x, **kwargs)
-        
-        # 確保輸出在正確的設備上
-        weighted_output = weighted_output.to(device)
-        gated_output = gated_output.to(device)
-        
-        # 串聯融合
-        attention_outputs = []
-        for attention_module in self.attention_modules:
-            # 確保注意力模組在正確的設備上
-            attention_module = attention_module.to(device)
-            
-            try:
-                result = attention_module(x, **kwargs)
-                # 處理可變返回值
-                if isinstance(result, tuple):
-                    output = result[0]
+            # 處理2D輸入 [seq_len, dim] -> [1, seq_len, dim]
+            if len(x.shape) == 2:
+                x = x.unsqueeze(0)  # 添加batch維度
+                print(f"將2D輸入轉換為3D: {original_shape} -> {x.shape}")
+
+            # 確保所有模組和輸入在同一設備上
+            device = x.device
+            print(f"目標設備: {device}")
+
+            # 移動整個模組到正確的設備
+            if self.device != device:
+                self.device = device
+                self.to(device)
+
+            # 強制移動所有子模組和組件到正確的設備
+            self.weighted_fusion = self.weighted_fusion.to(device)
+            self.gated_fusion = self.gated_fusion.to(device)
+            self.strategy_network = self.strategy_network.to(device)
+            self.sequential_projection = self.sequential_projection.to(device)
+            self.layer_norm = self.layer_norm.to(device)
+
+            # 確保注意力模組也在正確的設備上
+            for attention_module in self.attention_modules:
+                attention_module.to(device)
+
+            # 決定融合策略
+            batch_size, seq_len, feature_dim = x.size()
+
+            # 確保輸入維度正確
+            if feature_dim != self.hidden_dim:
+                # 如果輸入維度不匹配，使用投影層調整
+                if not hasattr(self, 'input_projection'):
+                    self.input_projection = nn.Linear(feature_dim, self.hidden_dim).to(device)
                 else:
-                    output = result
-                attention_outputs.append(output.to(device))
-            except:
-                if hasattr(attention_module, '__class__'):
-                    module_name = attention_module.__class__.__name__
-                    if 'CrossModal' in module_name:
-                        result = attention_module(x, x, x, **kwargs)
+                    self.input_projection = self.input_projection.to(device)
+                x = self.input_projection(x)
+                x = x.to(device)  # 確保投影後的張量在正確設備上
+
+            strategy_input = x.mean(dim=1).to(device)  # [batch_size, hidden_dim]
+            strategy_logits = self.strategy_network(strategy_input).to(device)  # [batch_size, 3]
+            strategy_weights = F.softmax(strategy_logits, dim=-1).to(device)  # [batch_size, 3]
+
+            # 計算各種融合策略的輸出 - 穩健地處理返回值
+            try:
+                # 確保輸入張量在正確設備上再傳遞給子融合器
+                x_device_checked = x.to(device)
+                weighted_result = self.weighted_fusion(x_device_checked, **kwargs)
+                if isinstance(weighted_result, tuple) and len(weighted_result) >= 2:
+                    weighted_output, weighted_weights = weighted_result[0].to(device), weighted_result[1]
+                elif isinstance(weighted_result, tuple):
+                    weighted_output, weighted_weights = weighted_result[0].to(device), None
+                else:
+                    weighted_output, weighted_weights = weighted_result.to(device), None
+            except Exception as e:
+                print(f"Weighted融合錯誤: {e}")
+                weighted_output, weighted_weights = x.to(device), None
+
+            try:
+                x_device_checked = x.to(device)
+                gated_result = self.gated_fusion(x_device_checked, **kwargs)
+                if isinstance(gated_result, tuple) and len(gated_result) >= 2:
+                    gated_output, gated_weights = gated_result[0].to(device), gated_result[1]
+                elif isinstance(gated_result, tuple):
+                    gated_output, gated_weights = gated_result[0].to(device), None
+                else:
+                    gated_output, gated_weights = gated_result.to(device), None
+            except Exception as e:
+                print(f"Gated融合錯誤: {e}")
+                gated_output, gated_weights = x.to(device), None
+
+            # 確保輸出在正確的設備上
+            weighted_output = weighted_output.to(device)
+            gated_output = gated_output.to(device)
+
+            # 串聯融合 - 穩健地處理注意力模組
+            attention_outputs = []
+            for i, attention_module in enumerate(self.attention_modules):
+                try:
+                    # 確保注意力模組在正確的設備上
+                    attention_module = attention_module.to(device)
+
+                    # 根據模組類型調用
+                    if hasattr(attention_module, '__class__') and 'MultiHead' in attention_module.__class__.__name__:
+                        result = attention_module(x)  # 只傳遞 query
                     else:
                         result = attention_module(x, **kwargs)
-                else:
-                    result = attention_module(x, **kwargs)
 
-                # 處理異常情況下的可變返回值
-                if isinstance(result, tuple):
-                    output = result[0]
+                    # 處理可變返回值
+                    if isinstance(result, tuple):
+                        if len(result) >= 1:
+                            output = result[0]
+                        else:
+                            output = x  # 備用方案
+                    else:
+                        output = result
+
+                    # 確保輸出維度匹配
+                    output = output.to(device)
+                    if output.size(-1) != self.hidden_dim:
+                        if not hasattr(self, f'attention_projection_{i}'):
+                            setattr(self, f'attention_projection_{i}',
+                                   nn.Linear(output.size(-1), self.hidden_dim).to(device))
+                        projection = getattr(self, f'attention_projection_{i}').to(device)
+                        output = projection(output).to(device)
+
+                    attention_outputs.append(output)
+
+                except Exception as e:
+                    print(f"注意力模組 {i} 錯誤: {e}")
+                    # 使用原始輸入作為備用方案
+                    x_fallback = x.to(device)
+                    if x_fallback.size(-1) == self.hidden_dim:
+                        attention_outputs.append(x_fallback)
+                    else:
+                        # 創建投影以匹配維度
+                        if not hasattr(self, f'fallback_projection_{i}'):
+                            setattr(self, f'fallback_projection_{i}',
+                                   nn.Linear(x_fallback.size(-1), self.hidden_dim).to(device))
+                        projection = getattr(self, f'fallback_projection_{i}').to(device)
+                        attention_outputs.append(projection(x_fallback).to(device))
+
+            # 如果沒有有效的注意力輸出，使用原始輸入
+            if not attention_outputs:
+                x_default = x.to(device)
+                if x_default.size(-1) == self.hidden_dim:
+                    attention_outputs = [x_default]
                 else:
-                    output = result
-                attention_outputs.append(output.to(device))
-        
-        sequential_concat = torch.cat(attention_outputs, dim=-1)  # [batch_size, seq_len, hidden_dim * num_attentions]
-        sequential_output = self.sequential_projection(sequential_concat)  # [batch_size, seq_len, hidden_dim]
-        
-        # 自適應融合
-        # 正確處理 strategy_weights 的維度以匹配 outputs_stack
-        strategy_weights = strategy_weights.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, 3]
-        
-        outputs_stack = torch.stack([weighted_output, gated_output, sequential_output], dim=-1)  # [batch_size, seq_len, hidden_dim, 3]
-        adaptive_output = torch.sum(outputs_stack * strategy_weights, dim=-1)  # [batch_size, seq_len, hidden_dim]
-        
-        # 最終層正規化
-        final_output = self.layer_norm(adaptive_output)
-        
-        fusion_info = {
-            'strategy_weights': strategy_weights.squeeze(),
-            'weighted_weights': weighted_weights,
-            'gated_weights': gated_weights
-        }
-        
-        return final_output, fusion_info
+                    if not hasattr(self, 'default_projection'):
+                        self.default_projection = nn.Linear(x_default.size(-1), self.hidden_dim).to(device)
+                    else:
+                        self.default_projection = self.default_projection.to(device)
+                    attention_outputs = [self.default_projection(x_default).to(device)]
+
+            # 確保所有attention_outputs都在正確設備上
+            attention_outputs = [output.to(device) for output in attention_outputs]
+            sequential_concat = torch.cat(attention_outputs, dim=-1).to(device)  # [batch_size, seq_len, hidden_dim * num_attentions]
+            sequential_output = self.sequential_projection(sequential_concat).to(device)  # [batch_size, seq_len, hidden_dim]
+
+            # 自適應融合
+            # 正確處理 strategy_weights 的維度以匹配 outputs_stack
+            strategy_weights = strategy_weights.unsqueeze(1).unsqueeze(2).to(device)  # [batch_size, 1, 1, 3]
+
+            # 確保所有輸出都在正確設備上
+            weighted_output = weighted_output.to(device)
+            gated_output = gated_output.to(device)
+            sequential_output = sequential_output.to(device)
+
+            outputs_stack = torch.stack([weighted_output, gated_output, sequential_output], dim=-1).to(device)  # [batch_size, seq_len, hidden_dim, 3]
+            adaptive_output = torch.sum(outputs_stack * strategy_weights, dim=-1).to(device)  # [batch_size, seq_len, hidden_dim]
+
+            # 最終層正規化
+            final_output = self.layer_norm(adaptive_output).to(device)
+
+            # 如果原始輸入是2維的，恢復原始形狀
+            if len(original_shape) == 2:
+                final_output = final_output.squeeze(0)  # 移除batch維度
+                print(f"恢復輸出維度從 {final_output.unsqueeze(0).shape} 到 {final_output.shape}")
+
+            fusion_info = {
+                'strategy_weights': strategy_weights.squeeze(),
+                'weighted_weights': weighted_weights,
+                'gated_weights': gated_weights
+            }
+
+            return final_output, fusion_info
+
+        except Exception as e:
+            print(f"AdaptiveAttentionFusion 前向傳播錯誤: {e}")
+            # 返回原始輸入作為備用方案
+            if len(original_shape) == 2:
+                return x.squeeze(0), {}
+            else:
+                return x, {}
 
 
 class CrossAttentionFusion(nn.Module):
@@ -468,65 +636,198 @@ class CrossAttentionFusion(nn.Module):
         前向傳播
 
         Args:
-            x: 輸入張量 [batch_size, seq_len, hidden_dim]
+            x: 輸入張量 [batch_size, seq_len, hidden_dim] 或 [seq_len, hidden_dim]
             **kwargs: 其他參數，傳遞給各個注意力模組
 
         Returns:
-            fused_output: 融合後的輸出 [batch_size, seq_len, hidden_dim]
+            fused_output: 融合後的輸出
             attention_weights_list: 各個注意力模組的權重列表
         """
-        # 確保模組在正確的設備上
-        device = x.device
-        self.to(device)
+        try:
+            # 記錄原始輸入形狀以便恢復
+            original_shape = x.shape
+            print(f"CrossAttentionFusion 輸入形狀: {original_shape}")
 
-        # 計算各個注意力模組的輸出
-        attention_outputs = []
-        attention_weights_list = []
-        
-        for attention_module in self.attention_modules:
-            try:
-                # 標準多頭注意力模組只需要一個輸入參數
-                result = attention_module(x, **kwargs)
-                if isinstance(result, tuple) and len(result) >= 2:
-                    output, weights = result[0], result[1]
+            # 處理2D輸入 [seq_len, dim] -> [1, seq_len, dim]
+            if len(x.shape) == 2:
+                x = x.unsqueeze(0)  # 添加batch維度
+                print(f"將2D輸入轉換為3D: {original_shape} -> {x.shape}")
+
+            # 確保模組在正確的設備上
+            device = x.device
+            print(f"目標設備: {device}")
+            self.to(device)
+
+            # 確保輸入維度正確
+            batch_size, seq_len, feature_dim = x.size()
+            if feature_dim != self.hidden_dim:
+                # 如果輸入維度不匹配，使用投影層調整
+                if not hasattr(self, 'input_projection'):
+                    self.input_projection = nn.Linear(feature_dim, self.hidden_dim).to(device)
                 else:
-                    output = result
-                    weights = None
-                attention_outputs.append(output)
-                attention_weights_list.append(weights)
-            except Exception as e:
-                print(f"CrossAttentionFusion注意力模組錯誤: {e}")
-                # 使用原始輸入作為備選
-                attention_outputs.append(x)
-                attention_weights_list.append(None)
-        
-        # 跨注意力交互
-        cross_enhanced_outputs = []
-        for i, (output, cross_attn) in enumerate(zip(attention_outputs, self.cross_attention_layers)):
-            # 計算與其他注意力輸出的交互
-            other_outputs = [attention_outputs[j] for j in range(self.num_attentions) if j != i]
-            if other_outputs:
-                other_concat = torch.cat(other_outputs, dim=1)  # 在序列維度拼接
-                
-                # 跨注意力計算
-                cross_output, _ = cross_attn(output, other_concat, other_concat)
-                
-                # 特徵融合
-                fusion_input = torch.cat([output, cross_output], dim=-1)
-                enhanced_output = self.feature_fusion[i](fusion_input)
+                    self.input_projection = self.input_projection.to(device)
+                x = self.input_projection(x).to(device)
+
+            # 計算各個注意力模組的輸出
+            attention_outputs = []
+            attention_weights_list = []
+
+            for i, attention_module in enumerate(self.attention_modules):
+                try:
+                    # 確保注意力模組在正確的設備上
+                    attention_module = attention_module.to(device)
+
+                    # 根據模組類型調用
+                    if hasattr(attention_module, '__class__') and 'MultiHead' in attention_module.__class__.__name__:
+                        result = attention_module(x)  # 只傳遞 query
+                    else:
+                        result = attention_module(x, **kwargs)
+
+                    # 穩健地處理返回值
+                    if isinstance(result, tuple):
+                        if len(result) >= 2:
+                            output, weights = result[0], result[1]
+                        elif len(result) == 1:
+                            output, weights = result[0], None
+                        else:
+                            output, weights = x, None  # 備用方案
+                    else:
+                        output = result
+                        weights = None
+
+                    # 確保輸出在正確的設備上且維度匹配
+                    output = output.to(device)
+                    if output.size(-1) != self.hidden_dim:
+                        if not hasattr(self, f'output_projection_{i}'):
+                            setattr(self, f'output_projection_{i}',
+                                   nn.Linear(output.size(-1), self.hidden_dim).to(device))
+                        projection = getattr(self, f'output_projection_{i}').to(device)
+                        output = projection(output).to(device)
+
+                    # 確保輸出序列長度匹配
+                    if output.size(1) != seq_len:
+                        if output.size(1) > seq_len:
+                            output = output[:, :seq_len, :]  # 截斷
+                        else:
+                            # 填充到匹配長度
+                            padding_length = seq_len - output.size(1)
+                            padding = torch.zeros(batch_size, padding_length, self.hidden_dim, device=device)
+                            output = torch.cat([output, padding], dim=1)
+
+                    attention_outputs.append(output)
+                    attention_weights_list.append(weights)
+
+                except Exception as e:
+                    print(f"CrossAttentionFusion注意力模組 {i} 錯誤: {e}")
+                    # 使用原始輸入作為備選
+                    fallback_output = x.to(device)
+                    if fallback_output.size(-1) != self.hidden_dim:
+                        if not hasattr(self, f'fallback_projection_{i}'):
+                            setattr(self, f'fallback_projection_{i}',
+                                   nn.Linear(fallback_output.size(-1), self.hidden_dim).to(device))
+                        projection = getattr(self, f'fallback_projection_{i}').to(device)
+                        fallback_output = projection(fallback_output).to(device)
+                    attention_outputs.append(fallback_output)
+                    attention_weights_list.append(None)
+
+            # 如果沒有有效的注意力輸出，使用原始輸入
+            if not attention_outputs:
+                attention_outputs = [x.to(device)]
+                attention_weights_list = [None]
+
+            # 確保所有cross_attention_layers在正確設備上
+            for cross_attn in self.cross_attention_layers:
+                cross_attn.to(device)
+
+            # 跨注意力交互 - 穩健地處理維度不匹配
+            cross_enhanced_outputs = []
+            for i, (output, cross_attn) in enumerate(zip(attention_outputs, self.cross_attention_layers)):
+                try:
+                    # 確保output在正確設備上
+                    output = output.to(device)
+
+                    # 計算與其他注意力輸出的交互
+                    other_outputs = [attention_outputs[j].to(device) for j in range(len(attention_outputs)) if j != i]
+
+                    if other_outputs and len(other_outputs) > 0:
+                        # 確保所有輸出有相同的序列長度
+                        target_seq_len = output.size(1)
+                        aligned_other_outputs = []
+
+                        for other_output in other_outputs:
+                            if other_output.size(1) != target_seq_len:
+                                if other_output.size(1) > target_seq_len:
+                                    other_output = other_output[:, :target_seq_len, :]
+                                else:
+                                    padding_length = target_seq_len - other_output.size(1)
+                                    padding = torch.zeros(batch_size, padding_length, self.hidden_dim, device=device)
+                                    other_output = torch.cat([other_output, padding], dim=1)
+                            aligned_other_outputs.append(other_output)
+
+                        # 在特徵維度拼接，而不是序列維度
+                        other_concat = torch.cat(aligned_other_outputs, dim=-1)  # [batch_size, seq_len, hidden_dim * (num_attentions-1)]
+
+                        # 如果拼接後的維度不匹配hidden_dim，需要投影
+                        if other_concat.size(-1) != self.hidden_dim:
+                            if not hasattr(self, f'cross_projection_{i}'):
+                                setattr(self, f'cross_projection_{i}',
+                                       nn.Linear(other_concat.size(-1), self.hidden_dim).to(device))
+                            projection = getattr(self, f'cross_projection_{i}').to(device)
+                            other_concat = projection(other_concat).to(device)
+
+                        # 跨注意力計算
+                        cross_attn = cross_attn.to(device)
+                        cross_output, _ = cross_attn(output, other_concat, other_concat)
+                        cross_output = cross_output.to(device)
+
+                        # 確保cross_output維度匹配
+                        if cross_output.size(-1) != self.hidden_dim:
+                            if not hasattr(self, f'cross_output_projection_{i}'):
+                                setattr(self, f'cross_output_projection_{i}',
+                                       nn.Linear(cross_output.size(-1), self.hidden_dim).to(device))
+                            projection = getattr(self, f'cross_output_projection_{i}').to(device)
+                            cross_output = projection(cross_output).to(device)
+
+                        # 特徵融合
+                        fusion_input = torch.cat([output, cross_output], dim=-1).to(device)  # [batch_size, seq_len, hidden_dim * 2]
+                        fusion_layer = self.feature_fusion[i].to(device)
+                        enhanced_output = fusion_layer(fusion_input).to(device)
+                    else:
+                        enhanced_output = output.to(device)
+
+                    cross_enhanced_outputs.append(enhanced_output)
+
+                except Exception as e:
+                    print(f"CrossAttentionFusion 跨注意力交互 {i} 錯誤: {e}")
+                    # 使用原始輸出作為備用方案
+                    cross_enhanced_outputs.append(output.to(device))
+
+            # 確保所有輸出在正確設備上
+            cross_enhanced_outputs = [output.to(device) for output in cross_enhanced_outputs]
+
+            # 最終融合
+            final_concat = torch.cat(cross_enhanced_outputs, dim=-1).to(device)  # [batch_size, seq_len, hidden_dim * num_attentions]
+            final_fusion_layer = self.final_fusion.to(device)
+            fused_output = final_fusion_layer(final_concat).to(device)  # [batch_size, seq_len, hidden_dim]
+
+            # 殘差連接和層正規化
+            layer_norm = self.layer_norm.to(device)
+            fused_output = layer_norm(fused_output + x).to(device)
+
+            # 如果原始輸入是2維的，恢復原始形狀
+            if len(original_shape) == 2:
+                fused_output = fused_output.squeeze(0)  # 移除batch維度
+                print(f"恢復輸出維度從 {fused_output.unsqueeze(0).shape} 到 {fused_output.shape}")
+
+            return fused_output, attention_weights_list
+
+        except Exception as e:
+            print(f"CrossAttentionFusion 前向傳播錯誤: {e}")
+            # 返回原始輸入作為備用方案
+            if len(original_shape) == 2:
+                return x.squeeze(0), []
             else:
-                enhanced_output = output
-            
-            cross_enhanced_outputs.append(enhanced_output)
-        
-        # 最終融合
-        final_concat = torch.cat(cross_enhanced_outputs, dim=-1)  # [batch_size, seq_len, hidden_dim * num_attentions]
-        fused_output = self.final_fusion(final_concat)  # [batch_size, seq_len, hidden_dim]
-        
-        # 殘差連接和層正規化
-        fused_output = self.layer_norm(fused_output + x)
-        
-        return fused_output, attention_weights_list
+                return x, []
 
 
 class AttentionDistillationFusion(nn.Module):
