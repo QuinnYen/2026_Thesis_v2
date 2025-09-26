@@ -53,7 +53,7 @@ from data.data_converter import create_experiment_data_converter
 class Experiment2Controller:
     """實驗2控制器：注意力機制比較實驗"""
     
-    def __init__(self, config: Dict[str, Any], output_dir: str = "experiment2_results"):
+    def __init__(self, config: Dict[str, Any], output_dir: str = "results/experiment2"):
         """
         初始化實驗2控制器
         
@@ -129,14 +129,14 @@ class Experiment2Controller:
         # SemEval 2014 資料集
         if data_config.get('use_semeval2014', True):
             loader_2014 = SemEval2014Loader(
-                data_dir=data_config.get('semeval2014_path', 'data/SemEval2014')
+                data_dir=data_config.get('semeval2014_path', 'data/raw/SemEval-2014')
             )
             loaders['semeval2014'] = loader_2014
         
         # SemEval 2016 資料集  
         if data_config.get('use_semeval2016', True):
             loader_2016 = SemEval2016Loader(
-                data_dir=data_config.get('semeval2016_path', 'data/SemEval2016')
+                data_dir=data_config.get('semeval2016_path', 'data/raw/SemEval-2016')
             )
             loaders['semeval2016'] = loader_2016
         
@@ -722,8 +722,8 @@ def create_experiment2_config() -> Dict[str, Any]:
         'data': {
             'use_semeval2014': True,
             'use_semeval2016': True,
-            'semeval2014_path': 'data/SemEval2014',
-            'semeval2016_path': 'data/SemEval2016',
+            'semeval2014_path': 'data/raw/SemEval-2014',
+            'semeval2016_path': 'data/raw/SemEval-2016',
             'max_length': 512
         },
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',

@@ -134,17 +134,17 @@ class ConfigManager:
                 'raw_data_dir': 'data/raw',
                 'processed_data_dir': 'data/processed',
                 'cache_dir': 'data/cache',
-                'output_dir': 'outputs',
-                'model_dir': 'outputs/models',
-                'figure_dir': 'outputs/figures',
-                'report_dir': 'outputs/reports'
+                'output_dir': 'results',
+                'model_dir': 'results/models',
+                'figure_dir': 'results/visualizations',
+                'report_dir': 'results'
             },
             
             # 日誌配置
             'logging': {
                 'level': 'INFO',
                 'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                'log_dir': 'experiments/logs'
+                'log_dir': 'results/logs'
             }
         }
     

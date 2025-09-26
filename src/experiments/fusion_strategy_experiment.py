@@ -43,6 +43,61 @@ from attention.attention_fusion import (
 from attention.multi_head_attention import StandardMultiHeadAttention
 
 
+def convert_to_experiment_format(aspect_data: List, domain_name: str = None) -> Dict[str, Any]:
+    """
+    將 AspectSentiment 數據轉換為實驗需要的格式
+
+    Args:
+        aspect_data: AspectSentiment 對象列表
+        domain_name: 可選的領域名稱覆蓋
+
+    Returns:
+        包含 features 和 labels 的字典
+    """
+    if not aspect_data:
+        return {'features': [], 'labels': []}
+
+    features = []
+    labels = []
+
+    # 情感標籤映射
+    sentiment_map = {
+        'positive': 2,
+        'negative': 0,
+        'neutral': 1,
+        'conflict': 1  # 將 conflict 映射到 neutral
+    }
+
+    for sample in aspect_data:
+        # 創建簡單的文本特徵 (這裡使用文本長度、面向術語位置等作為特徵)
+        text_len = len(sample.text.split())
+        aspect_len = len(sample.aspect_term.split()) if sample.aspect_term else 0
+        aspect_position = sample.start_position / max(len(sample.text), 1)  # 正規化位置
+
+        # 創建768維的特徵向量 (簡化版本，實際中應使用預訓練的嵌入)
+        feature_vector = np.zeros(768)
+
+        # 簡單的特徵編碼
+        feature_vector[0] = text_len / 100.0  # 正規化文本長度
+        feature_vector[1] = aspect_len / 10.0  # 正規化面向術語長度
+        feature_vector[2] = aspect_position  # 面向術語位置
+
+        # 使用文本和面向術語的簡單hash作為特徵
+        text_hash = hash(sample.text) % 765
+        feature_vector[3:] = np.random.RandomState(text_hash).normal(0, 0.1, 765)
+
+        features.append(feature_vector.tolist())
+
+        # 轉換情感標籤
+        sentiment_label = sentiment_map.get(sample.sentiment.lower(), 1)  # 默認為neutral
+        labels.append(sentiment_label)
+
+    return {
+        'features': features,
+        'labels': labels
+    }
+
+
 class ConcatenationFusion(nn.Module):
     """簡單拼接融合策略"""
     
@@ -211,13 +266,21 @@ class ComputationalComplexityAnalyzer:
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
-        # 創建測試輸入用於計算複雜度分析
-        dummy_input = torch.randn(input_shape).to(self.device)
-        model = model.to(self.device)
+        # 檢測模型當前所在的設備，保持一致性
+        model_device = next(model.parameters()).device if list(model.parameters()) else self.device
+        analysis_device = model_device if model_device.type != 'cpu' else self.device
+        
+        print(f"複雜度分析 - 模型設備: {model_device}, 分析設備: {analysis_device}")
+        
+        # 創建測試輸入用於計算複雜度分析，使用模型的設備
+        dummy_input = torch.randn(input_shape).to(analysis_device)
+        # 只有在設備不一致時才移動模型
+        if model_device != analysis_device:
+            model = model.to(analysis_device)
         model.eval()
         
         # 測量記憶體使用
-        if torch.cuda.is_available() and self.device == 'cuda':
+        if torch.cuda.is_available() and analysis_device.type == 'cuda':
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.empty_cache()
             
@@ -245,7 +308,7 @@ class ComputationalComplexityAnalyzer:
                 _ = model(dummy_input)
         
         # 計時運行
-        if torch.cuda.is_available() and self.device == 'cuda':
+        if torch.cuda.is_available() and analysis_device.type == 'cuda':
             torch.cuda.synchronize()
         
         start_time = time.time()
@@ -253,7 +316,7 @@ class ComputationalComplexityAnalyzer:
             with torch.no_grad():
                 _ = model(dummy_input)
         
-        if torch.cuda.is_available() and self.device == 'cuda':
+        if torch.cuda.is_available() and analysis_device.type == 'cuda':
             torch.cuda.synchronize()
         
         end_time = time.time()
@@ -358,6 +421,8 @@ class FusionStrategyExperiment:
                 num_heads=8,
                 dropout=0.1
             )
+            # 立即移動到正確的設備
+            attention = attention.to(self.device)
             attention_modules.append(attention)
         
         return attention_modules
@@ -368,9 +433,22 @@ class FusionStrategyExperiment:
             raise ValueError(f"不支援的融合策略: {fusion_strategy}")
         
         fusion_class = self.fusion_strategies[fusion_strategy]
-        fusion_model = fusion_class(self.base_attention_modules, self.hidden_dim)
         
-        return fusion_model.to(self.device)
+        # 確保基礎注意力模組在正確的設備上
+        base_modules = []
+        for module in self.base_attention_modules:
+            module = module.to(self.device)
+            base_modules.append(module)
+        
+        # 創建融合模型並移動到設備
+        fusion_model = fusion_class(base_modules, self.hidden_dim)
+        fusion_model = fusion_model.to(self.device)
+        
+        # 強制移動所有子模組到正確設備
+        for name, param in fusion_model.named_parameters():
+            param.data = param.data.to(self.device)
+        
+        return fusion_model
     
     def run_single_experiment(self, fusion_strategy: str, 
                             train_datasets: Dict[str, Any],
@@ -381,6 +459,10 @@ class FusionStrategyExperiment:
         
         # 創建融合模型
         fusion_model = self.create_fusion_model(fusion_strategy)
+        
+        # 確保模型在正確的設備上
+        fusion_model = fusion_model.to(self.device)
+        print(f"融合模型設備: {next(fusion_model.parameters()).device}")
         
         # 分析計算複雜度
         input_shape = (16, 128, self.hidden_dim)  # batch_size, seq_len, hidden_dim
@@ -750,7 +832,7 @@ class FusionStrategyExperiment:
         return report
     
     def save_results(self, results: Dict[str, ExperimentResult], 
-                    report: Dict[str, Any], output_dir: str = "experiment_results"):
+                    report: Dict[str, Any], output_dir: str = "results/experiment1"):
         """保存實驗結果"""
         os.makedirs(output_dir, exist_ok=True)
         
@@ -795,19 +877,67 @@ def main():
     """主函數 - 示範如何使用融合策略實驗框架"""
     # 初始化實驗
     experiment = FusionStrategyExperiment(hidden_dim=768)
-    
-    # 模擬資料集 (實際使用時需要載入真實資料)
-    train_datasets = {
-        'restaurant': None,  # 實際的訓練資料集
-        'laptop': None,
-        'device': None
-    }
-    
-    test_datasets = {
-        'restaurant': None,  # 實際的測試資料集
-        'laptop': None,
-        'device': None
-    }
+
+    # 載入真實數據集
+    try:
+        # 導入數據載入器
+        sys.path.insert(0, str(parent_dir / 'data'))
+        from data.data_loader import DatasetManager
+        import numpy as np
+
+        # 初始化數據集管理器
+        data_manager = DatasetManager(str(parent_dir.parent / 'data'))
+
+        print("載入數據集...")
+
+        # 載入並處理數據集
+        train_datasets = {}
+        test_datasets = {}
+
+        # 載入 restaurant 數據 (使用 SemEval-2014)
+        try:
+            restaurant_train = data_manager.load_dataset('semeval2014', 'restaurant', 'train')
+            restaurant_test = data_manager.load_dataset('semeval2014', 'restaurant', 'test')
+
+            # 轉換為實驗需要的格式
+            train_datasets['restaurant'] = convert_to_experiment_format(restaurant_train)
+            test_datasets['restaurant'] = convert_to_experiment_format(restaurant_test)
+            print(f"成功載入 restaurant 數據: train={len(restaurant_train)}, test={len(restaurant_test)}")
+        except Exception as e:
+            print(f"載入 restaurant 數據失敗: {e}")
+
+        # 載入 laptop 數據 (使用 SemEval-2014)
+        try:
+            laptop_train = data_manager.load_dataset('semeval2014', 'laptop', 'train')
+            laptop_test = data_manager.load_dataset('semeval2014', 'laptop', 'test')
+
+            # 轉換為實驗需要的格式
+            train_datasets['laptop'] = convert_to_experiment_format(laptop_train)
+            test_datasets['laptop'] = convert_to_experiment_format(laptop_test)
+            print(f"成功載入 laptop 數據: train={len(laptop_train)}, test={len(laptop_test)}")
+        except Exception as e:
+            print(f"載入 laptop 數據失敗: {e}")
+
+        # 如果有 SemEval-2016 數據，可以作為第三個領域
+        try:
+            device_train = data_manager.load_dataset('semeval2016', 'laptop', 'train')
+            device_test = data_manager.load_dataset('semeval2016', 'laptop', 'test')
+
+            # 轉換為實驗需要的格式，並標記為 device 領域
+            train_datasets['device'] = convert_to_experiment_format(device_train, domain_name='device')
+            test_datasets['device'] = convert_to_experiment_format(device_test, domain_name='device')
+            print(f"成功載入 device 數據: train={len(device_train)}, test={len(device_test)}")
+        except Exception as e:
+            print(f"載入 device 數據失敗: {e}")
+
+        print(f"成功載入 {len(train_datasets)} 個領域的訓練數據")
+        print(f"成功載入 {len(test_datasets)} 個領域的測試數據")
+
+    except Exception as e:
+        print(f"數據載入失敗: {e}")
+        print("使用空數據集進行測試...")
+        train_datasets = {'restaurant': None, 'laptop': None, 'device': None}
+        test_datasets = {'restaurant': None, 'laptop': None, 'device': None}
     
     # 運行實驗
     results = experiment.run_all_experiments(train_datasets, test_datasets, num_epochs=5)

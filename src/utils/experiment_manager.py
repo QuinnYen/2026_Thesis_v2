@@ -105,7 +105,7 @@ class ExperimentManager:
     """實驗管理器"""
     
     def __init__(self, base_config_dir: str = "configs",
-                 results_dir: str = "outputs/experiments"):
+                 results_dir: str = "results"):
         """
         初始化實驗管理器
         

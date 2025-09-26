@@ -18,7 +18,7 @@ from contextlib import contextmanager
 class ExperimentLogger:
     """實驗日誌記錄器"""
     
-    def __init__(self, experiment_name: str, log_dir: str = "experiments/logs"):
+    def __init__(self, experiment_name: str, log_dir: str = "results/logs"):
         """
         初始化實驗日誌記錄器
         
@@ -339,7 +339,7 @@ class LoggingManager:
     
     def cleanup_old_logs(self, days_to_keep: int = 30):
         """清理舊的日誌文件"""
-        log_dir = Path("experiments/logs")
+        log_dir = Path("results/logs")
         if not log_dir.exists():
             return
         

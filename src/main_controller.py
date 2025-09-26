@@ -103,7 +103,7 @@ class CrossDomainSentimentAnalysisController:
         self.logger = ExperimentLogger(self.config.get('experiment_name', 'cross_domain_sentiment'))
         
         # 初始化模型快取
-        self.model_cache = ModelCache(self.config.get('model_cache_dir', 'outputs/models'))
+        self.model_cache = ModelCache(self.config.get('model_cache_dir', 'results/models'))
         
         # 設置設備
         self.device = self.config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
@@ -1044,7 +1044,7 @@ class CrossDomainSentimentAnalysisController:
     def _save_experiment_report(self, report: Dict[str, Any]):
         """保存實驗報告"""
         # 創建輸出目錄
-        output_dir = Path(self.config.get('output_dir', 'outputs/reports'))
+        output_dir = Path(self.config.get('output_dir', 'results'))
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # 生成報告文件名
@@ -2768,7 +2768,7 @@ class CrossDomainSentimentAnalysisController:
         }
         
         # 創建實驗輸出目錄
-        exp_output_dir = os.path.join(self.config.get('output_dir', 'outputs'), 'systematic_experiments')
+        exp_output_dir = self.config.get('output_dir', 'results')
         os.makedirs(exp_output_dir, exist_ok=True)
         
         try:

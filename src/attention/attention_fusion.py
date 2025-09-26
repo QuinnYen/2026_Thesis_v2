@@ -127,8 +127,8 @@ class WeightedAttentionFusion(nn.Module):
                     if not hasattr(self, f'input_projection_{i}'):
                         setattr(self, f'input_projection_{i}',
                                nn.Linear(output.size(-1), self.hidden_dim).to(device))
-                    projection = getattr(self, f'input_projection_{i}')
-                    output = projection(output)
+                    projection = getattr(self, f'input_projection_{i}').to(device)
+                    output = projection(output).to(device)
 
                 attention_outputs.append(output)
                 attention_weights_list.append(weights)
@@ -257,12 +257,14 @@ class GatedAttentionFusion(nn.Module):
                     if not hasattr(self, f'input_projection_{i}'):
                         setattr(self, f'input_projection_{i}',
                                nn.Linear(output.size(-1), self.hidden_dim).to(device))
-                    projection = getattr(self, f'input_projection_{i}')
-                    output = projection(output)
+                    projection = getattr(self, f'input_projection_{i}').to(device)
+                    output = projection(output).to(device)
 
                 # 上下文融合
                 context_input = torch.cat([x, output], dim=-1)  # [batch_size, seq_len, hidden_dim * 2]
-                fused_context = self.context_fusion[i](context_input)  # [batch_size, seq_len, hidden_dim]
+                # 確保context_fusion也在正確設備上
+                self.context_fusion[i] = self.context_fusion[i].to(device)
+                fused_context = self.context_fusion[i](context_input).to(device)  # [batch_size, seq_len, hidden_dim]
 
                 attention_outputs.append(fused_context)
                 attention_weights_list.append(weights)
@@ -443,6 +445,10 @@ class AdaptiveAttentionFusion(nn.Module):
             # 確保注意力模組也在正確的設備上
             for attention_module in self.attention_modules:
                 attention_module.to(device)
+            
+            # 確保所有參數都在正確的設備上
+            for param in self.parameters():
+                param.data = param.data.to(device)
 
             # 決定融合策略
             batch_size, seq_len, feature_dim = x.size()
@@ -454,15 +460,24 @@ class AdaptiveAttentionFusion(nn.Module):
                     self.input_projection = nn.Linear(feature_dim, self.hidden_dim).to(device)
                 else:
                     self.input_projection = self.input_projection.to(device)
-                x = self.input_projection(x)
-                x = x.to(device)  # 確保投影後的張量在正確設備上
+                x = self.input_projection(x).to(device)  # 確保投影後的張量在正確設備上
 
+            # 確保所有計算都在正確的設備上
             strategy_input = x.mean(dim=1).to(device)  # [batch_size, hidden_dim]
-            strategy_logits = self.strategy_network(strategy_input).to(device)  # [batch_size, 3]
-            strategy_weights = F.softmax(strategy_logits, dim=-1).to(device)  # [batch_size, 3]
+            
+            # 確保strategy_network在正確設備上
+            self.strategy_network = self.strategy_network.to(device)
+            strategy_logits = self.strategy_network(strategy_input)  # [batch_size, 3]
+            strategy_weights = F.softmax(strategy_logits, dim=-1)  # [batch_size, 3]
+            
+            # 確保所有張量在正確設備上
+            strategy_logits = strategy_logits.to(device)
+            strategy_weights = strategy_weights.to(device)
 
             # 計算各種融合策略的輸出 - 穩健地處理返回值
             try:
+                # 確保子融合器在正確設備上
+                self.weighted_fusion = self.weighted_fusion.to(device)
                 # 確保輸入張量在正確設備上再傳遞給子融合器
                 x_device_checked = x.to(device)
                 weighted_result = self.weighted_fusion(x_device_checked, **kwargs)
@@ -477,6 +492,8 @@ class AdaptiveAttentionFusion(nn.Module):
                 weighted_output, weighted_weights = x.to(device), None
 
             try:
+                # 確保子融合器在正確設備上
+                self.gated_fusion = self.gated_fusion.to(device)
                 x_device_checked = x.to(device)
                 gated_result = self.gated_fusion(x_device_checked, **kwargs)
                 if isinstance(gated_result, tuple) and len(gated_result) >= 2:
@@ -555,6 +572,8 @@ class AdaptiveAttentionFusion(nn.Module):
             # 確保所有attention_outputs都在正確設備上
             attention_outputs = [output.to(device) for output in attention_outputs]
             sequential_concat = torch.cat(attention_outputs, dim=-1).to(device)  # [batch_size, seq_len, hidden_dim * num_attentions]
+            # 確保sequential_projection在正確設備上
+            self.sequential_projection = self.sequential_projection.to(device)
             sequential_output = self.sequential_projection(sequential_concat).to(device)  # [batch_size, seq_len, hidden_dim]
 
             # 自適應融合
@@ -570,6 +589,7 @@ class AdaptiveAttentionFusion(nn.Module):
             adaptive_output = torch.sum(outputs_stack * strategy_weights, dim=-1).to(device)  # [batch_size, seq_len, hidden_dim]
 
             # 最終層正規化
+            self.layer_norm = self.layer_norm.to(device)
             final_output = self.layer_norm(adaptive_output).to(device)
 
             # 如果原始輸入是2維的，恢復原始形狀
@@ -657,6 +677,15 @@ class CrossAttentionFusion(nn.Module):
             device = x.device
             print(f"目標設備: {device}")
             self.to(device)
+            
+            # 強制確保所有子模組都在正確的設備上
+            for name, module in self.named_modules():
+                if module != self:  # 避免遞歸移動自己
+                    module.to(device)
+            
+            # 確保所有參數都在正確的設備上
+            for param in self.parameters():
+                param.data = param.data.to(device)
 
             # 確保輸入維度正確
             batch_size, seq_len, feature_dim = x.size()
@@ -719,7 +748,8 @@ class CrossAttentionFusion(nn.Module):
 
                 except Exception as e:
                     print(f"CrossAttentionFusion注意力模組 {i} 錯誤: {e}")
-                    # 使用原始輸入作為備選
+                    print(f"注意力模組類型: {type(attention_module)}, 輸入設備: {x.device}, 目標設備: {device}")
+                    # 使用原始輸入作為備選，確保設備一致性
                     fallback_output = x.to(device)
                     if fallback_output.size(-1) != self.hidden_dim:
                         if not hasattr(self, f'fallback_projection_{i}'):
@@ -727,6 +757,8 @@ class CrossAttentionFusion(nn.Module):
                                    nn.Linear(fallback_output.size(-1), self.hidden_dim).to(device))
                         projection = getattr(self, f'fallback_projection_{i}').to(device)
                         fallback_output = projection(fallback_output).to(device)
+                    # 強制確保輸出在正確設備上
+                    fallback_output = fallback_output.to(device)
                     attention_outputs.append(fallback_output)
                     attention_weights_list.append(None)
 
@@ -799,8 +831,10 @@ class CrossAttentionFusion(nn.Module):
 
                 except Exception as e:
                     print(f"CrossAttentionFusion 跨注意力交互 {i} 錯誤: {e}")
-                    # 使用原始輸出作為備用方案
-                    cross_enhanced_outputs.append(output.to(device))
+                    print(f"當前設備: {device}, 輸出設備: {output.device if hasattr(output, 'device') else 'N/A'}")
+                    # 使用原始輸出作為備用方案，確保設備一致性
+                    safe_output = output.to(device) if hasattr(output, 'to') else x.to(device)
+                    cross_enhanced_outputs.append(safe_output)
 
             # 確保所有輸出在正確設備上
             cross_enhanced_outputs = [output.to(device) for output in cross_enhanced_outputs]
