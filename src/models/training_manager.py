@@ -18,6 +18,11 @@ from typing import Dict, List, Optional, Any, Callable
 import numpy as np
 from pathlib import Path
 import json
+from tqdm import tqdm
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from evaluation.standard_evaluator import StandardEvaluator
 
 
 class TrainingManager:
@@ -61,6 +66,11 @@ class TrainingManager:
             min_delta=config.get('min_delta', 1e-4),
             restore_best_weights=config.get('restore_best_weights', True)
         )
+
+        # 評估器設置 (用於計算F1分數等詳細指標)
+        # 動態確定類別標籤
+        class_labels = config.get('class_labels', ['negative', 'neutral', 'positive'])
+        self.evaluator = StandardEvaluator(class_labels=class_labels)
         
         # 訓練歷史
         self.history = {
@@ -180,19 +190,14 @@ class TrainingManager:
             
             if model_reinitialized:
                 # 重新初始化優化器和排程器
-                print("🔄 模型維度已自動調整，重新建立優化器...")
                 self.optimizer = self._setup_optimizer()
                 self.scheduler = self._setup_scheduler()
-                print("✅ 優化器和排程器重新建立完成")
             else:
                 # 除錯：顯示為什麼沒有重新初始化
                 expected_dim = getattr(self.model, '_expected_input_dim', '未知')
-                print(f"🔍 除錯資訊：模型類型 {type(self.model).__name__}, 預期維度: {expected_dim}, 實際維度: {actual_dim}")
                     
         except Exception as e:
-            print(f"❌ 維度檢查出現錯誤: {e}")
-            import traceback
-            traceback.print_exc()
+            pass  # 靜默處理維度檢查錯誤
 
     def train_epoch(self) -> Dict[str, float]:
         """訓練一個epoch"""
@@ -224,18 +229,14 @@ class TrainingManager:
                 outputs = self.model(inputs)
             except RuntimeError as e:
                 if "Input dimension mismatch" in str(e) or "輸入維度不匹配" in str(e):
-                    print(f"❌ 捕獲到維度錯誤，嘗試自動修復：{e}")
                     # 如果維度檢查失敗，再次嘗試修復
                     self._check_and_fix_model_dimensions(inputs)
-                    print("🔄 已嘗試修復維度問題，重新執行前向傳播...")
                     # 確保模型在正確設備上
                     self.model = self.model.to(self.device)
                     try:
                         outputs = self.model(inputs)
                     except RuntimeError as retry_e:
-                        print(f"❌ 重試後仍然失敗：{retry_e}")
-                        print(f"🔍 模型預期維度：{getattr(self.model, '_expected_input_dim', '未知')}")
-                        print(f"🔍 實際輸入維度：{inputs.size(-1) if not isinstance(inputs, dict) else '字典輸入'}")
+                        # 靜默處理重試失敗
                         raise retry_e
                 else:
                     raise e
@@ -274,7 +275,11 @@ class TrainingManager:
         total_loss = 0
         correct_predictions = 0
         total_samples = 0
-        
+
+        # 收集所有預測和真實標籤用於計算詳細指標
+        all_predictions = []
+        all_labels = []
+
         with torch.no_grad():
             for batch in self.val_loader:
                 # 移動數據到設備
@@ -285,41 +290,69 @@ class TrainingManager:
                     # 處理單一張量
                     inputs = batch['features'].to(self.device)
                 labels = batch['labels'].to(self.device)
-                
+
                 outputs = self.model(inputs)
-                
+
                 if isinstance(outputs, dict):
                     logits = outputs['logits']
                 else:
                     logits = outputs
-                
+
                 loss = self.criterion(logits, labels)
-                
+
                 total_loss += loss.item()
                 predictions = torch.argmax(logits, dim=-1)
                 correct_predictions += (predictions == labels).sum().item()
                 total_samples += labels.size(0)
-        
+
+                # 收集預測和標籤
+                all_predictions.extend(predictions.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+
         avg_loss = total_loss / len(self.val_loader)
         accuracy = correct_predictions / total_samples
-        
-        return {'loss': avg_loss, 'accuracy': accuracy}
+
+        # 使用評估器計算詳細指標
+        try:
+            detailed_metrics = self.evaluator.evaluate_predictions(
+                y_true=np.array(all_labels),
+                y_pred=np.array(all_predictions)
+            )
+
+            # 合併基本指標和詳細指標
+            result = {
+                'loss': avg_loss,
+                'accuracy': accuracy,
+                **detailed_metrics  # 包含 f1, f1_macro, f1_micro, f1_weighted 等
+            }
+
+        except Exception as e:
+            # 如果評估器出錯，回退到基本指標
+            print(f"警告：評估器計算失敗: {e}")
+            result = {'loss': avg_loss, 'accuracy': accuracy}
+
+        return result
     
     def train(self, epochs: int) -> Dict[str, List]:
         """執行完整訓練"""
-        print(f"開始訓練，共 {epochs} 個 epoch")
-        
-        for epoch in range(epochs):
-            print(f"\\nEpoch {epoch + 1}/{epochs}")
-            print("-" * 50)
-            
+
+        # 使用進度條顯示訓練進度
+        pbar = tqdm(range(epochs), desc="訓練進度", unit="epoch")
+
+        for epoch in pbar:
             # 訓練階段
             train_metrics = self.train_epoch()
-            print(f"訓練 - 損失: {train_metrics['loss']:.4f}, 準確率: {train_metrics['accuracy']:.4f}")
-            
+
             # 驗證階段
             val_metrics = self.validate_epoch()
-            print(f"驗證 - 損失: {val_metrics['loss']:.4f}, 準確率: {val_metrics['accuracy']:.4f}")
+
+            # 更新進度條顯示
+            pbar.set_postfix({
+                'Train Loss': f"{train_metrics['loss']:.4f}",
+                'Train Acc': f"{train_metrics['accuracy']:.4f}",
+                'Val Loss': f"{val_metrics['loss']:.4f}",
+                'Val Acc': f"{val_metrics['accuracy']:.4f}"
+            })
             
             # 更新歷史
             self.history['train_loss'].append(train_metrics['loss'])

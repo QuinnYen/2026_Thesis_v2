@@ -17,6 +17,11 @@ from typing import Dict, List, Any, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+import warnings
+
+# 過濾matplotlib的tight_layout警告
+warnings.filterwarnings("ignore", "Tight layout not applied")
+warnings.filterwarnings("ignore", "tight_layout cannot make Axes")
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -57,17 +62,6 @@ from models import (
     CrossDomainClassifier, TrainingManager, ModelCache
 )
 
-# 導入實驗框架
-try:
-    from experiments import (
-        Experiment1Controller, Experiment2Controller, Experiment3Controller,
-        create_experiment1_config, create_experiment2_config, create_experiment3_config
-    )
-    EXPERIMENTS_AVAILABLE = True
-except ImportError as e:
-    print(f"警告：實驗框架導入失敗 - {str(e)}")
-    print("將跳過系統性實驗，僅運行基本模型訓練")
-    EXPERIMENTS_AVAILABLE = False
 
 
 class CrossDomainSentimentAnalysisController:
@@ -270,12 +264,59 @@ class CrossDomainSentimentAnalysisController:
         
         # 數據分割
         self._split_datasets()
-        
+
+        # 數據集標準化
+        self._standardize_datasets()
+
         self._data_loaded = True
         self.logger.info(f"數據集載入完成，共載入 {len(self.datasets)} 個數據集")
         
         return self.datasets
     
+    def _get_output_dir_for_chart(self, chart_type: str, experiment_type: Optional[str] = None) -> Path:
+        """
+        根據圖表類型和實驗類型決定輸出目錄
+
+        Args:
+            chart_type: 圖表類型 (如 'learning_curves', 'comparison_matrix' 等)
+            experiment_type: 實驗類型 (如 'experiment_1', 'experiment_2', 'experiment_3')
+
+        Returns:
+            輸出目錄路徑
+        """
+        base_output_dir = Path(self.config.get('output_dir', 'results'))
+
+        # 定義圖表分類規則
+        experiment_1_charts = [
+            'model_comparison_matrix', 'model_performance_radar', 'learning_curves'
+        ]
+
+        experiment_2_charts = [
+            'attention_', 'attention_heatmap', 'attention_weights'
+        ]
+
+        experiment_3_charts = [
+            'cross_domain_alignment', 'domain_transfer', 'fusion_strategy'
+        ]
+
+        general_charts = [
+            'feature_tsne_distribution', 'feature_pca_distribution',
+            'cross_domain_semantic_distribution', 'comprehensive_dashboard'
+        ]
+
+        # 根據圖表類型決定輸出目錄
+        if any(pattern in chart_type for pattern in experiment_1_charts):
+            return base_output_dir / 'experiment_1_model_architecture' / 'visualizations'
+        elif any(pattern in chart_type for pattern in experiment_2_charts):
+            return base_output_dir / 'experiment_2_attention_mechanisms' / 'visualizations'
+        elif any(pattern in chart_type for pattern in experiment_3_charts):
+            return base_output_dir / 'experiment_3_combination_baseline' / 'visualizations'
+        elif any(pattern in chart_type for pattern in general_charts):
+            return base_output_dir / 'general_analysis' / 'visualizations'
+        else:
+            # 無法分類的圖表放到獨立資料夾
+            return base_output_dir / 'miscellaneous_charts' / 'visualizations'
+
     def _split_datasets(self):
         """分割數據集為訓練、驗證、測試集"""
         data_config = self.config.get('data', {})
@@ -302,7 +343,216 @@ class CrossDomainSentimentAnalysisController:
                 }
                 
                 self.logger.info(f"{dataset_name} 數據分割完成: 訓練 {len(train_data)}, 驗證 {len(val_data)}, 測試 {len(test_data)} 樣本")
-    
+
+    def _standardize_datasets(self):
+        """標準化數據集的標籤分布"""
+        standardization_config = self.config.get('data', {}).get('standardization', {})
+
+        if not standardization_config.get('enabled', True):
+            self.logger.info("數據集標準化已禁用")
+            return
+
+        strategy = standardization_config.get('strategy', 'balanced_sampling')
+        self.logger.info(f"開始數據集標準化，策略: {strategy}")
+
+        if strategy == 'balanced_sampling':
+            self._apply_balanced_sampling()
+        elif strategy == 'uniform_distribution':
+            self._apply_uniform_distribution()
+        elif strategy == 'class_weights':
+            self._calculate_class_weights()
+        elif strategy == 'label_mapping':
+            self._apply_label_mapping()
+        else:
+            self.logger.warning(f"未知的標準化策略: {strategy}")
+
+    def _apply_balanced_sampling(self):
+        """應用平衡採樣標準化"""
+        from collections import Counter
+        import random
+
+        # 設置隨機種子確保可重現性
+        random.seed(self.config.get('random_seed', 42))
+
+        self.logger.info("應用平衡採樣標準化...")
+
+        # 收集所有數據集的標籤分布信息
+        all_labels = set()
+        dataset_distributions = {}
+
+        for dataset_name, dataset_splits in self.datasets.items():
+            if 'train' in dataset_splits:
+                train_labels = [item.sentiment for item in dataset_splits['train']]
+                dataset_distributions[dataset_name] = Counter(train_labels)
+                all_labels.update(train_labels)
+
+        self.logger.info(f"發現的所有標籤: {sorted(all_labels)}")
+
+        # 計算目標樣本數量 (每個標籤使用最小數量)
+        min_counts = {}
+        for label in all_labels:
+            counts = [dist.get(label, 0) for dist in dataset_distributions.values()]
+            counts = [c for c in counts if c > 0]  # 只考慮存在該標籤的數據集
+            if counts:
+                min_counts[label] = min(counts)
+
+        self.logger.info(f"目標平衡數量: {min_counts}")
+
+        # 對每個數據集應用平衡採樣
+        for dataset_name, dataset_splits in self.datasets.items():
+            if 'train' not in dataset_splits:
+                continue
+
+            train_data = dataset_splits['train']
+
+            # 按標籤分組數據
+            label_groups = {}
+            for item in train_data:
+                label = item.sentiment
+                if label not in label_groups:
+                    label_groups[label] = []
+                label_groups[label].append(item)
+
+            # 平衡採樣
+            balanced_data = []
+            for label in all_labels:
+                if label in label_groups and label in min_counts:
+                    target_count = min_counts[label]
+                    available_data = label_groups[label]
+
+                    if len(available_data) >= target_count:
+                        # 下採樣
+                        sampled_data = random.sample(available_data, target_count)
+                    else:
+                        # 上採樣 (重複採樣)
+                        sampled_data = []
+                        while len(sampled_data) < target_count:
+                            sampled_data.extend(random.sample(available_data,
+                                                            min(len(available_data),
+                                                                target_count - len(sampled_data))))
+
+                    balanced_data.extend(sampled_data)
+
+            # 更新數據集
+            random.shuffle(balanced_data)
+            self.datasets[dataset_name]['train'] = balanced_data
+
+            # 重新計算分布
+            new_distribution = Counter(item.sentiment for item in balanced_data)
+            self.logger.info(f"{dataset_name} 平衡後: {dict(new_distribution)}")
+
+    def _apply_uniform_distribution(self):
+        """應用均勻分布標準化"""
+        from collections import Counter
+        import random
+
+        # 設置隨機種子確保可重現性
+        random.seed(self.config.get('random_seed', 42))
+
+        self.logger.info("應用均勻分布標準化...")
+
+        # 收集所有標籤
+        all_labels = set()
+        for dataset_splits in self.datasets.values():
+            if 'train' in dataset_splits:
+                all_labels.update(item.sentiment for item in dataset_splits['train'])
+
+        # 對每個數據集應用均勻分布
+        for dataset_name, dataset_splits in self.datasets.items():
+            if 'train' not in dataset_splits:
+                continue
+
+            train_data = dataset_splits['train']
+            total_samples = len(train_data)
+            target_per_class = total_samples // len(all_labels)
+
+            # 按標籤分組
+            label_groups = {}
+            for item in train_data:
+                label = item.sentiment
+                if label not in label_groups:
+                    label_groups[label] = []
+                label_groups[label].append(item)
+
+            # 均勻採樣
+            uniform_data = []
+            for label in all_labels:
+                if label in label_groups:
+                    available_data = label_groups[label]
+
+                    if len(available_data) >= target_per_class:
+                        sampled_data = random.sample(available_data, target_per_class)
+                    else:
+                        # 重複採樣達到目標數量
+                        sampled_data = []
+                        while len(sampled_data) < target_per_class:
+                            sampled_data.extend(random.sample(available_data,
+                                                            min(len(available_data),
+                                                                target_per_class - len(sampled_data))))
+
+                    uniform_data.extend(sampled_data)
+
+            # 更新數據集
+            random.shuffle(uniform_data)
+            self.datasets[dataset_name]['train'] = uniform_data
+
+            # 記錄結果
+            new_distribution = Counter(item.sentiment for item in uniform_data)
+            self.logger.info(f"{dataset_name} 均勻化後: {dict(new_distribution)}")
+
+    def _calculate_class_weights(self):
+        """計算類別權重用於損失函數"""
+        from collections import Counter
+        from sklearn.utils.class_weight import compute_class_weight
+        import numpy as np
+
+        self.logger.info("計算類別權重...")
+
+        self.class_weights = {}
+
+        for dataset_name, dataset_splits in self.datasets.items():
+            if 'train' not in dataset_splits:
+                continue
+
+            train_labels = [item.sentiment for item in dataset_splits['train']]
+            unique_labels = sorted(set(train_labels))
+
+            # 計算類別權重
+            weights = compute_class_weight(
+                'balanced',
+                classes=np.array(unique_labels),
+                y=np.array(train_labels)
+            )
+
+            weight_dict = dict(zip(unique_labels, weights))
+            self.class_weights[dataset_name] = weight_dict
+
+            self.logger.info(f"{dataset_name} 類別權重: {weight_dict}")
+
+    def _apply_label_mapping(self):
+        """應用標籤映射標準化 (統一標籤體系)"""
+        mapping_config = self.config.get('data', {}).get('standardization', {}).get('label_mapping', {})
+
+        if not mapping_config:
+            self.logger.info("未配置標籤映射，跳過標籤映射標準化")
+            return
+
+        self.logger.info("應用標籤映射標準化...")
+
+        for dataset_name, dataset_splits in self.datasets.items():
+            for split_name, split_data in dataset_splits.items():
+                for item in split_data:
+                    original_label = item.sentiment
+                    if original_label in mapping_config:
+                        item.sentiment = mapping_config[original_label]
+
+            # 記錄映射後的分布
+            train_labels = [item.sentiment for item in dataset_splits.get('train', [])]
+            if train_labels:
+                from collections import Counter
+                new_distribution = Counter(train_labels)
+                self.logger.info(f"{dataset_name} 標籤映射後: {dict(new_distribution)}")
+
     def preprocess_data(self) -> Dict[str, Any]:
         """
         預處理所有數據
@@ -724,6 +974,13 @@ class CrossDomainSentimentAnalysisController:
             'early_stopping_patience': 5,
             'save_best_model': True
         })
+
+        # 添加類別標籤到訓練配置
+        all_labels = set()
+        for dataset_splits in self.datasets.values():
+            if 'train' in dataset_splits:
+                all_labels.update(item.sentiment for item in dataset_splits['train'])
+        training_config['class_labels'] = sorted(list(all_labels))
         results = {}
         
         # 對每個模型進行訓練
@@ -857,7 +1114,6 @@ class CrossDomainSentimentAnalysisController:
                 'timestamp': datetime.now().isoformat(),
                 'config': self.config
             },
-            'data_statistics': self._generate_data_statistics(),
             'model_performance': self.experiment_results.get('training', {}),
             'attention_mechanism_comparison': self._generate_attention_comparison_analysis(),
             'cross_domain_alignment': self.experiment_results.get('cross_domain_alignment', {}),
@@ -867,8 +1123,7 @@ class CrossDomainSentimentAnalysisController:
         # 保存報告
         self._save_experiment_report(report)
         
-        # 報告生成後：創建交互式 HTML 報告
-        self._create_interactive_html_report(report)
+        # HTML 報告生成已移除，僅保留 JSON 報告
         
         self.logger.info("實驗報告生成完成")
         return report
@@ -1113,7 +1368,6 @@ class CrossDomainSentimentAnalysisController:
                     except:
                         continue
                     
-                    self.logger.info(f"成功設定中文字體: {font_name}")
                     font_set = True
                     break
                 except Exception:
@@ -1124,7 +1378,6 @@ class CrossDomainSentimentAnalysisController:
                 self._try_download_chinese_font()
                 # 使用 Unicode 字體作為後備
                 plt.rcParams['font.family'] = ['DejaVu Sans']
-                self.logger.warning("未找到合適的中文字體，建議安裝中文字體以正常顯示")
                 
                 # 設定替代方案 - 使用英文標籤
                 self._use_english_labels = True
@@ -1167,10 +1420,8 @@ class CrossDomainSentimentAnalysisController:
             
             # 如果字體不存在，嘗試下載
             if not font_path.exists():
-                self.logger.info("嘗試下載中文字體...")
                 try:
                     urllib.request.urlretrieve(font_url, font_path)
-                    self.logger.info("中文字體下載成功")
                     
                     # 重新設定字體
                     import matplotlib.pyplot as plt
@@ -1221,7 +1472,7 @@ class CrossDomainSentimentAnalysisController:
             domains_array = np.array(all_domains)
             
             # 建立視覺化輸出目錄
-            viz_dir = Path(self.config.get('output_dir', 'outputs')) / 'visualizations'
+            viz_dir = Path(self.config.get('output_dir', 'results')) / 'visualizations'
             viz_dir.mkdir(parents=True, exist_ok=True)
             
             # 生成 t-SNE 視覺化
@@ -1299,7 +1550,10 @@ class CrossDomainSentimentAnalysisController:
             plt.ylabel('t-SNE 2')
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'feature_tsne_distribution.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('feature_tsne_distribution')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'feature_tsne_distribution.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -1351,7 +1605,10 @@ class CrossDomainSentimentAnalysisController:
             plt.ylabel('解釋變異比')
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'feature_pca_distribution.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('feature_pca_distribution')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'feature_pca_distribution.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -1456,7 +1713,10 @@ class CrossDomainSentimentAnalysisController:
             plt.legend()
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'cross_domain_semantic_distribution.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('cross_domain_semantic_distribution')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'cross_domain_semantic_distribution.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -1475,7 +1735,7 @@ class CrossDomainSentimentAnalysisController:
             # 設定中文字體
             self._setup_chinese_font()
             # 建立視覺化輸出目錄
-            viz_dir = Path(self.config.get('output_dir', 'outputs')) / 'visualizations'
+            viz_dir = Path(self.config.get('output_dir', 'results')) / 'visualizations'
             viz_dir.mkdir(parents=True, exist_ok=True)
             
             # 生成模型對比矩陣
@@ -1570,7 +1830,10 @@ class CrossDomainSentimentAnalysisController:
             plt.legend()
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'model_comparison_matrix.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('model_comparison_matrix')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'model_comparison_matrix.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -1622,7 +1885,10 @@ class CrossDomainSentimentAnalysisController:
                 
                 plt.suptitle(f'{model_name} 學習曲線', fontsize=16)
                 self._safe_tight_layout()
-                plt.savefig(output_dir / f'{model_name}_learning_curves.png', dpi=300, bbox_inches='tight')
+                # 使用新的輸出目錄邏輯
+                chart_output_dir = self._get_output_dir_for_chart('learning_curves')
+                chart_output_dir.mkdir(parents=True, exist_ok=True)
+                plt.savefig(chart_output_dir / f'{model_name}_learning_curves.png', dpi=300, bbox_inches='tight')
                 plt.close()
                 
         except Exception as e:
@@ -1689,7 +1955,10 @@ class CrossDomainSentimentAnalysisController:
                               fontsize=8)
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'model_performance_radar.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('model_performance_radar')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'model_performance_radar.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -1708,7 +1977,7 @@ class CrossDomainSentimentAnalysisController:
             # 設定中文字體
             self._setup_chinese_font()
             # 建立視覺化輸出目錄
-            viz_dir = Path(self.config.get('output_dir', 'outputs')) / 'visualizations'
+            viz_dir = Path(self.config.get('output_dir', 'results')) / 'visualizations'
             viz_dir.mkdir(parents=True, exist_ok=True)
             
             # 生成對齊熱力圖
@@ -1860,7 +2129,10 @@ class CrossDomainSentimentAnalysisController:
                         f'{height:.3f}', ha='center', va='bottom')
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'cross_domain_alignment_heatmap.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('cross_domain_alignment')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'cross_domain_alignment_heatmap.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -1979,7 +2251,10 @@ class CrossDomainSentimentAnalysisController:
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.5))
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'cross_domain_alignment_summary.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('cross_domain_alignment')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'cross_domain_alignment_summary.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -2142,7 +2417,10 @@ class CrossDomainSentimentAnalysisController:
                 plt.title('對齊熱區分析')
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'domain_transfer_analysis.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('domain_transfer')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'domain_transfer_analysis.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -2241,7 +2519,10 @@ class CrossDomainSentimentAnalysisController:
                             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgreen", alpha=0.5))
             
             self._safe_tight_layout()
-            plt.savefig(output_dir / 'domain_transfer_analysis.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('domain_transfer')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'domain_transfer_analysis.png', dpi=300, bbox_inches='tight')
             plt.close()
             
         except Exception as e:
@@ -2259,7 +2540,7 @@ class CrossDomainSentimentAnalysisController:
             self._setup_chinese_font()
             
             # 建立視覺化輸出目錄
-            viz_dir = Path(self.config.get('output_dir', 'outputs')) / 'visualizations'
+            viz_dir = Path(self.config.get('output_dir', 'results')) / 'visualizations'
             viz_dir.mkdir(parents=True, exist_ok=True)
             
             import matplotlib.pyplot as plt
@@ -2309,7 +2590,10 @@ class CrossDomainSentimentAnalysisController:
             # 安全的布局調整
             self._safe_tight_layout(rect=[0, 0.03, 1, 0.95])
             
-            plt.savefig(viz_dir / 'comprehensive_dashboard.png', dpi=300, bbox_inches='tight')
+            # 使用新的輸出目錄邏輯
+            chart_output_dir = self._get_output_dir_for_chart('comprehensive_dashboard')
+            chart_output_dir.mkdir(parents=True, exist_ok=True)
+            plt.savefig(chart_output_dir / 'comprehensive_dashboard.png', dpi=300, bbox_inches='tight')
             plt.close()
             
             self.logger.info(f"綜合儀表板已保存到: {viz_dir}")
@@ -2538,378 +2822,218 @@ class CrossDomainSentimentAnalysisController:
             ax.set_title('結論與建議')
             ax.axis('off')
     
-    def _create_interactive_html_report(self, report):
-        """
-        創建交互式 HTML 報告
-        """
-        self.logger.info("創建交互式 HTML 報告...")
-        
-        try:
-            # 建立輸出目錄
-            output_dir = Path(self.config.get('output_dir', 'outputs'))
-            html_dir = output_dir / 'html_report'
-            html_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 生成 HTML 報告內容
-            html_content = self._generate_html_content(report)
-            
-            # 保存 HTML 文件
-            html_path = html_dir / 'experiment_report.html'
-            with open(html_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-            
-            # 複製視覺化圖片到 HTML 目錄
-            viz_dir = output_dir / 'visualizations'
-            if viz_dir.exists():
-                import shutil
-                html_viz_dir = html_dir / 'images'
-                if html_viz_dir.exists():
-                    shutil.rmtree(html_viz_dir)
-                shutil.copytree(viz_dir, html_viz_dir)
-            
-            self.logger.info(f"交互式 HTML 報告已保存到: {html_path}")
-            
-        except Exception as e:
-            self.logger.error(f"HTML 報告創建失敗: {e}")
-    
-    def _generate_html_content(self, report):
-        """生成 HTML 報告內容"""
-        html_template = '''
-        <!DOCTYPE html>
-        <html lang="zh-TW">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>跨領域情感分析實驗報告</title>
-            <style>
-                body {{ font-family: 'Microsoft JhengHei', Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }}
-                .container {{ max-width: 1200px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 20px rgba(0,0,0,0.1); }}
-                h1 {{ color: #2c3e50; text-align: center; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
-                h2 {{ color: #34495e; margin-top: 30px; }}
-                .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 20px 0; }}
-                .info-card {{ background: #ecf0f1; padding: 20px; border-radius: 8px; border-left: 4px solid #3498db; }}
-                .image-gallery {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin: 20px 0; }}
-                .image-item {{ text-align: center; }}
-                .image-item img {{ max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }}
-                .metrics-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-                .metrics-table th, .metrics-table td {{ border: 1px solid #ddd; padding: 12px; text-align: center; }}
-                .metrics-table th {{ background-color: #3498db; color: white; }}
-                .footer {{ text-align: center; margin-top: 40px; color: #7f8c8d; font-size: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>跨領域情感分析實驗報告</h1>
-                
-                <div class="info-grid">
-                    <div class="info-card">
-                        <h3>實驗信息</h3>
-                        <p><strong>實驗名稱:</strong> {experiment_name}</p>
-                        <p><strong>完成時間:</strong> {timestamp}</p>
-                        <p><strong>配置:</strong> 多模型跨領域情感分析</p>
-                    </div>
-                    <div class="info-card">
-                        <h3>數據統計</h3>
-                        <p><strong>數據集數量:</strong> {num_datasets}</p>
-                        <p><strong>總樣本數:</strong> {total_samples}</p>
-                        <p><strong>特徵維度:</strong> 多層次融合特徵</p>
-                    </div>
-                </div>
-                
-                <h2>綜合儀表板</h2>
-                <div class="image-gallery">
-                    <div class="image-item">
-                        <img src="images/comprehensive_dashboard.png" alt="綜合儀表板">
-                        <p>實驗綜合儀表板</p>
-                    </div>
-                </div>
-                
-                <h2>特徵分析</h2>
-                <div class="image-gallery">
-                    <div class="image-item">
-                        <img src="images/feature_tsne_distribution.png" alt="t-SNE特徵分佈">
-                        <p>t-SNE 特徵分佈</p>
-                    </div>
-                    <div class="image-item">
-                        <img src="images/feature_pca_distribution.png" alt="PCA特徵分佈">
-                        <p>PCA 特徵分佈</p>
-                    </div>
-                    <div class="image-item">
-                        <img src="images/cross_domain_semantic_distribution.png" alt="跨領域語義分佈">
-                        <p>跨領域語義分佈</p>
-                    </div>
-                </div>
-                
-                <h2>模型性能分析</h2>
-                <div class="image-gallery">
-                    <div class="image-item">
-                        <img src="images/model_comparison_matrix.png" alt="模型對比矩陣">
-                        <p>模型對比矩陣</p>
-                    </div>
-                    <div class="image-item">
-                        <img src="images/model_performance_radar.png" alt="模型性能雷達圖">
-                        <p>模型性能雷達圖</p>
-                    </div>
-                </div>
-                
-                <h2>跨領域對齊分析</h2>
-                <div class="image-gallery">
-                    <div class="image-item">
-                        <img src="images/cross_domain_alignment_heatmap.png" alt="跨領域對齊熱力圖">
-                        <p>跨領域對齊熱力圖</p>
-                    </div>
-                    <div class="image-item">
-                        <img src="images/domain_transfer_analysis.png" alt="領域轉移分析">
-                        <p>領域轉移分析</p>
-                    </div>
-                </div>
-                
-                <div class="footer">
-                    <p>© 2024 跨領域情感分析系統 | 自動生成報告</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        '''
-        
-        # 填充模板
-        experiment_name = report.get('experiment_info', {}).get('name', '未知實驗')
-        timestamp = report.get('experiment_info', {}).get('timestamp', '未知時間')
-        
-        # 計算統計數據
-        num_datasets = len(report.get('data_statistics', {}))
-        total_samples = sum(
-            sum(stats.get('samples', {}).values()) 
-            for stats in report.get('data_statistics', {}).values()
-            if isinstance(stats, dict) and 'samples' in stats
-        )
-        
-        return html_template.format(
-            experiment_name=experiment_name,
-            timestamp=timestamp,
-            num_datasets=num_datasets,
-            total_samples=total_samples
-        )
     
     def run_complete_experiment(self) -> Dict[str, Any]:
         """
-        運行完整的實驗流程
-        
+        運行完整的實驗流程，包含三個主要實驗
+
         Returns:
             完整的實驗結果
         """
         self.logger.info("開始運行完整實驗流程...")
         self.logger.start_performance_monitoring()
-        
+
         try:
-            # 1. 初始化組件
+            # 初始化階段
+            print("\n" + "="*80)
+            print("跨領域情感分析實驗系統 - 初始化階段")
+            print("="*80)
+
             self.initialize_components()
-            
-            # 2. 載入和預處理數據
             self.load_datasets()
             self.preprocess_data()
-            
-            # 3. 特徵提取
             self.extract_features()
-            
-            # 4. 構建模型
-            self.build_models()
-            
-            # 5. 創建數據載入器
             self.create_data_loaders()
-            
-            # 6. 訓練模型
+
+            # 構建和訓練所有模型（共同基礎）
+            print("\n正在構建和訓練模型...")
+            self.build_models()
             self.train_models()
-            
-            # 7. 跨領域對齊評估
-            self.evaluate_cross_domain_alignment()
-            
-            # 8. 生成實驗報告
-            final_report = self.generate_experiment_report()
-            
+
+            # 存儲所有實驗結果
+            all_experiments = {}
+
+            # 實驗一：模型架構比較
+            print("\n" + "="*80)
+            print("實驗一：模型架構比較")
+            print("="*80)
+            print("比較不同模型架構在跨領域情感分析任務上的性能表現")
+
+            experiment1_results = self._run_experiment_1_model_architecture()
+            all_experiments['experiment_1'] = {
+                'name': '模型架構比較',
+                'description': '比較不同模型架構在跨領域情感分析任務上的性能表現',
+                'results': experiment1_results
+            }
+
+            # 實驗二：注意力機制比較
+            print("\n" + "="*80)
+            print("實驗二：注意力機制比較")
+            print("="*80)
+            print("評估不同注意力機制對模型性能的影響")
+
+            experiment2_results = self._run_experiment_2_attention_mechanisms()
+            all_experiments['experiment_2'] = {
+                'name': '注意力機制比較',
+                'description': '評估不同注意力機制對模型性能的影響',
+                'results': experiment2_results
+            }
+
+            # 實驗三：組合效果與基線對比
+            print("\n" + "="*80)
+            print("實驗三：組合效果與基線對比")
+            print("="*80)
+            print("分析特徵融合策略的組合效果並與基線模型對比")
+
+            experiment3_results = self._run_experiment_3_combination_baseline()
+            all_experiments['experiment_3'] = {
+                'name': '組合效果與基線對比',
+                'description': '分析特徵融合策略的組合效果並與基線模型對比',
+                'results': experiment3_results
+            }
+
+            # 生成整合報告
+            print("\n" + "="*80)
+            print("生成整合實驗報告")
+            print("="*80)
+
+            final_report = self._generate_integrated_experiment_report(all_experiments)
+
             self.logger.info("完整實驗流程運行成功")
             self.logger.log_experiment_end(final_report)
-            
+
             return final_report
-            
+
         except Exception as e:
             self.logger.error(f"實驗運行失敗: {str(e)}")
             raise e
-        
+
         finally:
             self.logger.stop_performance_monitoring()
-    
-    def run_systematic_experiments(self, run_experiments: str = "all") -> Dict[str, Any]:
-        """
-        運行系統性實驗（實驗1-3）
-        
-        Args:
-            run_experiments: 運行哪些實驗 ("1", "2", "3", "1,2", "1,2,3", "all")
-        
-        Returns:
-            實驗結果字典
-        """
-        if not EXPERIMENTS_AVAILABLE:
-            raise ImportError("實驗框架未正確導入，無法運行系統性實驗")
-        
-        self.logger.info("開始運行系統性實驗...")
-        
-        # 解析要運行的實驗
-        if run_experiments == "all":
-            experiments_to_run = ["1", "2", "3"]
+
+    def _run_experiment_1_model_architecture(self) -> Dict[str, Any]:
+        """實驗一：模型架構比較"""
+        print("正在分析模型架構性能...")
+
+        # 獲取已訓練模型的性能數據
+        if hasattr(self, 'experiment_results') and 'training' in self.experiment_results:
+            model_performance = self.experiment_results['training']
         else:
-            experiments_to_run = [exp.strip() for exp in run_experiments.split(",")]
-        
+            # 如果還沒有訓練結果，則執行訓練
+            print("  執行模型訓練...")
+            model_performance = self.train_models()
+
+        # 保存實驗一結果到特定目錄
+        exp1_output_dir = Path(self.config.get('output_dir', 'results')) / 'experiment_1_model_architecture'
+        exp1_output_dir.mkdir(parents=True, exist_ok=True)
+
         results = {
-            'systematic_experiments': {
-                'experiments_run': experiments_to_run,
-                'timestamp': datetime.now().isoformat()
-            }
+            'experiment_info': {
+                'name': '實驗一：模型架構比較',
+                'timestamp': datetime.now().isoformat(),
+                'output_dir': str(exp1_output_dir)
+            },
+            'model_performance': model_performance
         }
-        
-        # 創建實驗輸出目錄
-        exp_output_dir = self.config.get('output_dir', 'results')
-        os.makedirs(exp_output_dir, exist_ok=True)
-        
-        try:
-            # 運行實驗1：融合策略比較
-            if "1" in experiments_to_run:
-                self.logger.info("運行實驗1：融合策略比較")
-                exp1_config = create_experiment1_config()
-                exp1_config.update({
-                    'data': self.config.get('data', {}),
-                    'device': self.device
-                })
-                
-                exp1_controller = Experiment1Controller(
-                    exp1_config, 
-                    os.path.join(exp_output_dir, 'experiment1')
-                )
-                exp1_results = exp1_controller.run_experiment()
-                results['systematic_experiments']['experiment1'] = exp1_results
-                
-                # 生成實驗1摘要
-                exp1_summary = exp1_controller.generate_summary_report()
-                print("\n" + "="*60)
-                print("實驗1：融合策略比較 - 完成")
-                print("="*60)
-                print(exp1_summary)
-            
-            # 運行實驗2：注意力機制比較
-            if "2" in experiments_to_run:
-                self.logger.info("運行實驗2：注意力機制比較")
-                exp2_config = create_experiment2_config()
-                exp2_config.update({
-                    'data': self.config.get('data', {}),
-                    'device': self.device
-                })
-                
-                # 如果實驗1已運行，使用其最佳融合策略
-                best_fusion_strategy = None
-                if "1" in experiments_to_run and 'experiment1' in results['systematic_experiments']:
-                    exp1_report = results['systematic_experiments']['experiment1'].get('report', {})
-                    best_fusion_strategy = exp1_report.get('analysis', {}).get('best_accuracy', {}).get('strategy')
-                    if best_fusion_strategy:
-                        exp2_config['best_fusion_strategy'] = best_fusion_strategy
-                        self.logger.info(f"使用實驗1最佳融合策略: {best_fusion_strategy}")
-                
-                exp2_controller = Experiment2Controller(
-                    exp2_config,
-                    os.path.join(exp_output_dir, 'experiment2')
-                )
-                exp2_results = exp2_controller.run_experiment(best_fusion_strategy)
-                results['systematic_experiments']['experiment2'] = exp2_results
-                
-                # 生成實驗2摘要
-                exp2_summary = exp2_controller.generate_summary_report()
-                print("\n" + "="*60)
-                print("實驗2：注意力機制比較 - 完成")
-                print("="*60)
-                print(exp2_summary)
-            
-            # 運行實驗3：組合效果分析
-            if "3" in experiments_to_run:
-                self.logger.info("運行實驗3：組合效果分析")
-                exp3_config = create_experiment3_config()
-                exp3_config.update({
-                    'data': self.config.get('data', {}),
-                    'device': self.device
-                })
-                
-                exp3_controller = Experiment3Controller(
-                    exp3_config,
-                    os.path.join(exp_output_dir, 'experiment3')
-                )
-                
-                # 如果前面的實驗已運行，使用其結果
-                should_run_integrated = ("1" in experiments_to_run or "2" in experiments_to_run)
-                
-                if should_run_integrated:
-                    # 運行整合實驗流程
-                    run_exp1 = "1" in experiments_to_run and 'experiment1' not in results['systematic_experiments']
-                    run_exp2 = "2" in experiments_to_run and 'experiment2' not in results['systematic_experiments']
-                    
-                    exp3_results = exp3_controller.run_integrated_experiments(
-                        run_exp1=run_exp1, run_exp2=run_exp2
-                    )
-                else:
-                    # 只運行實驗3
-                    exp3_results = exp3_controller.run_experiment()
-                
-                results['systematic_experiments']['experiment3'] = exp3_results
-                
-                # 生成實驗3摘要
-                exp3_summary = exp3_controller.generate_final_summary_report()
-                print("\n" + "="*60)
-                print("實驗3：組合效果分析 - 完成")
-                print("="*60)
-                print(exp3_summary)
-            
-            # 生成整體摘要
-            print("\n" + "="*80)
-            print("系統性實驗全部完成！")
-            print("="*80)
-            print(f"完成實驗: {', '.join([f'實驗{exp}' for exp in experiments_to_run])}")
-            print(f"結果保存位置: {exp_output_dir}")
-            
-            if len(experiments_to_run) >= 2:
-                print("\n主要發現:")
-                print("- 系統性比較了不同融合策略和注意力機制的效果")
-                print("- 通過統計檢驗驗證了改進的顯著性")
-                print("- 提供了詳細的實用指導和建議")
-            
-            # 保存整體實驗結果
-            overall_results_path = os.path.join(exp_output_dir, 'overall_systematic_experiments.json')
-            
-            # 使用自定義JSON編碼器
-            class CustomJSONEncoder(json.JSONEncoder):
-                def default(self, obj):
-                    if isinstance(obj, (np.integer, np.floating)):
-                        return obj.item()
-                    elif isinstance(obj, np.ndarray):
-                        return obj.tolist()
-                    elif isinstance(obj, np.bool_):
-                        return bool(obj)
-                    elif isinstance(obj, bool):
-                        return bool(obj)
-                    elif hasattr(obj, '__dict__'):
-                        return obj.__dict__
-                    elif hasattr(obj, '_asdict'):
-                        return obj._asdict()
-                    else:
-                        return str(obj)
-            
-            with open(overall_results_path, 'w', encoding='utf-8') as f:
-                json.dump(results, f, indent=2, ensure_ascii=False, cls=CustomJSONEncoder)
-            
-            self.logger.info(f"系統性實驗完成，結果保存到: {overall_results_path}")
-            
-        except Exception as e:
-            self.logger.error(f"系統性實驗執行失敗: {str(e)}")
-            results['systematic_experiments']['error'] = str(e)
-            raise
-        
+
+        # 保存實驗一結果
+        with open(exp1_output_dir / 'experiment_1_results.json', 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False, default=str)
+
+        print(f"✓ 實驗一完成，結果保存至：{exp1_output_dir}")
         return results
+
+    def _run_experiment_2_attention_mechanisms(self) -> Dict[str, Any]:
+        """實驗二：注意力機制比較"""
+        print("正在執行注意力機制比較實驗...")
+
+        # 生成注意力機制比較分析（基於已訓練的模型）
+        attention_comparison = self._generate_attention_comparison_analysis()
+
+        # 保存實驗二結果到特定目錄
+        exp2_output_dir = Path(self.config.get('output_dir', 'results')) / 'experiment_2_attention_mechanisms'
+        exp2_output_dir.mkdir(parents=True, exist_ok=True)
+
+        results = {
+            'experiment_info': {
+                'name': '實驗二：注意力機制比較',
+                'timestamp': datetime.now().isoformat(),
+                'output_dir': str(exp2_output_dir)
+            },
+            'attention_mechanism_comparison': attention_comparison
+        }
+
+        # 保存實驗二結果
+        with open(exp2_output_dir / 'experiment_2_results.json', 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False, default=str)
+
+        print(f"✓ 實驗二完成，結果保存至：{exp2_output_dir}")
+        return results
+
+    def _run_experiment_3_combination_baseline(self) -> Dict[str, Any]:
+        """實驗三：組合效果與基線對比"""
+        print("正在執行組合效果與基線對比實驗...")
+
+        # 執行跨領域對齊評估
+        cross_domain_alignment = self.evaluate_cross_domain_alignment()
+
+        # 保存實驗三結果到特定目錄
+        exp3_output_dir = Path(self.config.get('output_dir', 'results')) / 'experiment_3_combination_baseline'
+        exp3_output_dir.mkdir(parents=True, exist_ok=True)
+
+        results = {
+            'experiment_info': {
+                'name': '實驗三：組合效果與基線對比',
+                'timestamp': datetime.now().isoformat(),
+                'output_dir': str(exp3_output_dir)
+            },
+            'cross_domain_alignment': cross_domain_alignment
+        }
+
+        # 保存實驗三結果
+        with open(exp3_output_dir / 'experiment_3_results.json', 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False, default=str)
+
+        print(f"✓ 實驗三完成，結果保存至：{exp3_output_dir}")
+        return results
+
+    def _generate_integrated_experiment_report(self, all_experiments: Dict[str, Any]) -> Dict[str, Any]:
+        """生成整合的實驗報告"""
+        print("正在生成整合實驗報告...")
+
+        # 合併所有實驗結果
+        integrated_report = {
+            'experiment_info': {
+                'name': '跨領域情感分析綜合實驗',
+                'timestamp': datetime.now().isoformat(),
+                'total_experiments': len(all_experiments)
+            },
+            'experiments': all_experiments
+        }
+
+        # 從各實驗中提取關鍵結果用於兼容性
+        if 'experiment_1' in all_experiments:
+            integrated_report['model_performance'] = all_experiments['experiment_1']['results'].get('model_performance', {})
+
+        if 'experiment_2' in all_experiments:
+            integrated_report['attention_mechanism_comparison'] = all_experiments['experiment_2']['results'].get('attention_mechanism_comparison', {})
+
+        if 'experiment_3' in all_experiments:
+            integrated_report['cross_domain_alignment'] = all_experiments['experiment_3']['results'].get('cross_domain_alignment', {})
+
+        # 生成可視化和HTML報告
+        final_report = self.generate_experiment_report()
+
+        # 將整合的實驗資訊加入最終報告
+        final_report.update(integrated_report)
+
+        # 保存整合報告到主目錄
+        main_output_dir = Path(self.config.get('output_dir', 'results'))
+        with open(main_output_dir / 'integrated_experiment_report.json', 'w', encoding='utf-8') as f:
+            json.dump(final_report, f, indent=2, ensure_ascii=False, default=str)
+
+        print(f"✓ 整合報告完成，結果保存至：{main_output_dir}")
+        return final_report
 
 
 class FeatureDictToTensorAdapter(nn.Module):
@@ -3011,127 +3135,101 @@ class SentimentDataset(Dataset):
         }
 
 
-def main(config_path: Optional[str] = None, run_experiments: Optional[str] = None, 
-         experiment_mode: str = "basic"):
+def main(config_path: Optional[str] = None):
     """
     主函數 - 運行完整的跨領域情感分析實驗
-    
+
     Args:
         config_path: 配置文件路徑（可選）
-        run_experiments: 要運行的系統性實驗 ("1", "2", "3", "1,2", "all", None)
-        experiment_mode: 實驗模式 ("basic", "systematic", "both")
     """
     try:
         # 創建主控制器
         controller = CrossDomainSentimentAnalysisController(config_path)
-        
-        all_results = {}
-        
-        # 根據模式決定運行哪些實驗
-        if experiment_mode in ["basic", "both"]:
-            print("運行基本模型訓練和評估...")
-            # 運行基本實驗
-            basic_results = controller.run_complete_experiment()
-            all_results['basic_experiment'] = basic_results
-            
-            print("\\n" + "="*50)
-            print("基本實驗完成！")
-            print("="*50)
-            print(f"實驗名稱: {basic_results['experiment_info']['name']}")
-            print(f"完成時間: {basic_results['experiment_info']['timestamp']}")
-            
-            # 打印關鍵結果
-            if 'model_performance' in basic_results:
-                print("\\n模型性能總結:")
-                for model_name, model_results in basic_results['model_performance'].items():
-                    print(f"  {model_name}:")
-                    for dataset_name, dataset_results in model_results.items():
-                        test_acc = dataset_results['test_metrics'].get('accuracy', 0)
-                        print(f"    {dataset_name}: 測試準確率 = {test_acc:.4f}")
-        
-        # 運行系統性實驗
-        if experiment_mode in ["systematic", "both"] or run_experiments:
-            if not EXPERIMENTS_AVAILABLE:
-                print("\\n警告：實驗框架未正確導入，跳過系統性實驗")
-            else:
-                print("\\n運行系統性實驗...")
-                experiments_to_run = run_experiments or "all"
-                systematic_results = controller.run_systematic_experiments(experiments_to_run)
-                all_results['systematic_experiments'] = systematic_results
-        
-        # 返回結果
-        if experiment_mode == "basic" and not run_experiments:
-            # 只運行基本實驗時，保持原有輸出格式
-            results = basic_results
-            
-            print("\\n" + "="*50)
-            print("基本實驗完成！")
-            print("="*50)
-            print(f"實驗名稱: {results['experiment_info']['name']}")
-            print(f"完成時間: {results['experiment_info']['timestamp']}")
-            
-            # 打印關鍵結果
-            if 'model_performance' in results:
-                print("\\n模型性能總結:")
-                for model_name, model_results in results['model_performance'].items():
-                    print(f"  {model_name}:")
-                    for dataset_name, dataset_results in model_results.items():
-                        test_acc = dataset_results['test_metrics'].get('accuracy', 0)
-                        print(f"    {dataset_name}: 測試準確率 = {test_acc:.4f}")
-            
-            # 打印注意力機制比較結果
-            if 'attention_mechanism_comparison' in results:
-                print("\\n注意力機制比較分析:")
-                attention_comp = results['attention_mechanism_comparison']
-                
-                if 'error' in attention_comp:
-                    print(f"  {attention_comp['error']}")
-                else:
-                    print(f"  測試的注意力機制數量: {len(attention_comp.get('mechanisms_tested', []))}")
-                    
-                    if attention_comp.get('best_performing_mechanism'):
-                        print(f"  最佳表現機制: {attention_comp['best_performing_mechanism']}")
-                    
-                    if attention_comp.get('performance_ranking'):
-                        print("  性能排名:")
-                        for rank_info in attention_comp['performance_ranking'][:3]:  # 顯示前3名
-                            print(f"    {rank_info['rank']}. {rank_info['mechanism']}: "
-                                  f"準確率={rank_info['avg_accuracy']}, F1={rank_info['avg_f1']}")
-                    
-                    if attention_comp.get('baseline_comparison'):
-                        print("  與基線模型比較:")
-                        for baseline, comparison in attention_comp['baseline_comparison'].items():
-                            improvement = comparison['comparison_with_best_attention']['relative_improvement']
-                            print(f"    vs {baseline}: 相對提升 {improvement:.2f}%")
 
-            if 'cross_domain_alignment' in results:
-                print("\\n跨領域對齊評估:")
-                for alignment_key, alignment_score in results['cross_domain_alignment'].items():
-                    # 檢查 alignment_score 是否為數字或字典
-                    if isinstance(alignment_score, (int, float)):
-                        print(f"  {alignment_key}: {alignment_score:.4f}")
-                    elif isinstance(alignment_score, dict):
-                        print(f"  {alignment_key}: {alignment_score}")
-                    else:
-                        print(f"  {alignment_key}: {str(alignment_score)}")
-            
-            return results
-        else:
-            # 運行系統性實驗或組合實驗時，返回所有結果
-            print("\\n" + "="*80)
-            print("所有實驗完成！")
-            print("="*80)
-            print(f"完成時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            if 'basic_experiment' in all_results:
-                print("\\n✓ 基本模型訓練和評估 - 已完成")
-            
-            if 'systematic_experiments' in all_results:
-                sys_exp = all_results['systematic_experiments']['systematic_experiments']
-                completed_exps = sys_exp.get('experiments_run', [])
-                print(f"\\n✓ 系統性實驗 - 已完成: {', '.join([f'實驗{exp}' for exp in completed_exps])}")
-            
-            return all_results
+        print("運行跨領域情感分析綜合實驗...")
+        # 運行分類實驗
+        results = controller.run_complete_experiment()
+
+        print("\\n" + "="*80)
+        print("綜合實驗完成！")
+        print("="*80)
+        print(f"實驗名稱: {results['experiment_info']['name']}")
+        print(f"完成時間: {results['experiment_info']['timestamp']}")
+        print(f"總實驗數量: {results['experiment_info'].get('total_experiments', 3)}")
+
+        # 打印各實驗摘要
+        if 'experiments' in results:
+            print("\\n實驗執行摘要:")
+            for exp_key, exp_data in results['experiments'].items():
+                exp_name = exp_data['name']
+                exp_desc = exp_data['description']
+                print(f"  ✓ {exp_name}")
+                print(f"    {exp_desc}")
+
+        # 實驗一：模型架構比較結果
+        if 'model_performance' in results:
+            print("\\n" + "="*60)
+            print("實驗一：模型架構比較 - 結果摘要")
+            print("="*60)
+            for model_name, model_results in results['model_performance'].items():
+                print(f"  {model_name}:")
+                for dataset_name, dataset_results in model_results.items():
+                    test_acc = dataset_results['test_metrics'].get('accuracy', 0)
+                    print(f"    {dataset_name}: 測試準確率 = {test_acc:.4f}")
+
+        # 實驗二：注意力機制比較結果
+        if 'attention_mechanism_comparison' in results:
+            print("\\n" + "="*60)
+            print("實驗二：注意力機制比較 - 結果摘要")
+            print("="*60)
+            attention_comp = results['attention_mechanism_comparison']
+
+            if 'error' in attention_comp:
+                print(f"  {attention_comp['error']}")
+            else:
+                print(f"  測試的注意力機制數量: {len(attention_comp.get('mechanisms_tested', []))}")
+
+                if attention_comp.get('best_performing_mechanism'):
+                    print(f"  最佳表現機制: {attention_comp['best_performing_mechanism']}")
+
+                if attention_comp.get('performance_ranking'):
+                    print("  性能排名（前3名）:")
+                    for rank_info in attention_comp['performance_ranking'][:3]:
+                        print(f"    {rank_info['rank']}. {rank_info['mechanism']}: "
+                              f"準確率={rank_info['avg_accuracy']}, F1={rank_info['avg_f1']}")
+
+                if attention_comp.get('baseline_comparison'):
+                    print("  與基線模型比較:")
+                    for baseline, comparison in attention_comp['baseline_comparison'].items():
+                        improvement = comparison['comparison_with_best_attention']['relative_improvement']
+                        print(f"    vs {baseline}: 相對提升 {improvement:.2f}%")
+
+        # 實驗三：組合效果與基線對比結果
+        if 'cross_domain_alignment' in results:
+            print("\\n" + "="*60)
+            print("實驗三：組合效果與基線對比 - 結果摘要")
+            print("="*60)
+            for alignment_key, alignment_score in results['cross_domain_alignment'].items():
+                # 檢查 alignment_score 是否為數字或字典
+                if isinstance(alignment_score, (int, float)):
+                    print(f"  {alignment_key}: {alignment_score:.4f}")
+                elif isinstance(alignment_score, dict):
+                    print(f"  {alignment_key}: {alignment_score}")
+                else:
+                    print(f"  {alignment_key}: {str(alignment_score)}")
+
+        # 顯示結果保存位置
+        print("\\n" + "="*80)
+        print("結果保存位置:")
+        print("="*80)
+        main_output_dir = Path(controller.config.get('output_dir', 'results'))
+        print(f"  主要結果: {main_output_dir}")
+        print(f"  實驗一結果: {main_output_dir}/experiment_1_model_architecture")
+        print(f"  實驗二結果: {main_output_dir}/experiment_2_attention_mechanisms")
+        print(f"  實驗三結果: {main_output_dir}/experiment_3_combination_baseline")
+        print(f"  整合報告: {main_output_dir}/integrated_experiment_report.json")
+
+        return results
         
     except Exception as e:
         print(f"實驗運行失敗: {str(e)}")
@@ -3140,32 +3238,18 @@ def main(config_path: Optional[str] = None, run_experiments: Optional[str] = Non
 
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="跨領域情感分析實驗系統")
-    parser.add_argument('--config', type=str, default=None, 
+    parser.add_argument('--config', type=str, default=None,
                        help='配置文件路徑')
-    parser.add_argument('--mode', type=str, default="basic", 
-                       choices=["basic", "systematic", "both"],
-                       help='實驗模式: basic(基本訓練), systematic(系統性實驗), both(兩者都運行)')
-    parser.add_argument('--experiments', type=str, default=None,
-                       help='要運行的系統性實驗: 1(融合策略), 2(注意力機制), 3(組合分析), 1,2 或 all')
-    parser.add_argument('--quick', action='store_true',
-                       help='快速模式，減少訓練輪數以加快實驗速度')
-    
+
     args = parser.parse_args()
-    
+
     # 顯示運行模式
     print("="*60)
     print("跨領域情感分析實驗系統")
     print("="*60)
-    print(f"運行模式: {args.mode}")
-    if args.experiments:
-        print(f"指定實驗: {args.experiments}")
-    if args.quick:
-        print("快速模式: 啟用")
     print("="*60)
-    
+
     # 運行主程序
-    main(config_path=args.config, 
-         run_experiments=args.experiments, 
-         experiment_mode=args.mode)
+    main(config_path=args.config)

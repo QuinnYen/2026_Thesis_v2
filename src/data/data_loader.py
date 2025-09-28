@@ -202,7 +202,7 @@ class SemEval2016Loader:
         self.data_dir = Path(data_dir)
         self.domain_files = {
             'restaurant': {
-                'train': 'restaurants_train_sb1.xml',
+                'train': 'restaurants_train_sb1.xml',  # 這個文件不存在，需要處理
                 'test': 'restaurants_test_sb1.xml'
             },
             'laptop': {

@@ -135,7 +135,6 @@ class WeightedAttentionFusion(nn.Module):
 
             except Exception as e:
                 print(f"WeightedAttentionFusion注意力模組 {i} 錯誤: {e}")
-                print(f"輸入形狀: {x.shape}, 模組類型: {type(attention_module)}")
                 # 使用原始輸入作為備選
                 attention_outputs.append(x)
                 attention_weights_list.append(None)
@@ -270,7 +269,6 @@ class GatedAttentionFusion(nn.Module):
                 attention_weights_list.append(weights)
             except Exception as e:
                 print(f"GatedAttentionFusion注意力模組 {i} 錯誤: {e}")
-                print(f"輸入形狀: {x.shape}, 模組類型: {type(attention_module)}")
                 # 使用原始輸入作為備選
                 attention_outputs.append(x)
                 attention_weights_list.append(None)
@@ -419,7 +417,6 @@ class AdaptiveAttentionFusion(nn.Module):
         try:
             # 記錄原始輸入形狀以便恢復
             original_shape = x.shape
-            print(f"AdaptiveAttentionFusion 輸入形狀: {original_shape}")
 
             # 處理2D輸入 [seq_len, dim] -> [1, seq_len, dim]
             if len(x.shape) == 2:
@@ -428,7 +425,6 @@ class AdaptiveAttentionFusion(nn.Module):
 
             # 確保所有模組和輸入在同一設備上
             device = x.device
-            print(f"目標設備: {device}")
 
             # 移動整個模組到正確的設備
             if self.device != device:
@@ -666,7 +662,6 @@ class CrossAttentionFusion(nn.Module):
         try:
             # 記錄原始輸入形狀以便恢復
             original_shape = x.shape
-            print(f"CrossAttentionFusion 輸入形狀: {original_shape}")
 
             # 處理2D輸入 [seq_len, dim] -> [1, seq_len, dim]
             if len(x.shape) == 2:
@@ -675,7 +670,6 @@ class CrossAttentionFusion(nn.Module):
 
             # 確保模組在正確的設備上
             device = x.device
-            print(f"目標設備: {device}")
             self.to(device)
             
             # 強制確保所有子模組都在正確的設備上
@@ -748,7 +742,6 @@ class CrossAttentionFusion(nn.Module):
 
                 except Exception as e:
                     print(f"CrossAttentionFusion注意力模組 {i} 錯誤: {e}")
-                    print(f"注意力模組類型: {type(attention_module)}, 輸入設備: {x.device}, 目標設備: {device}")
                     # 使用原始輸入作為備選，確保設備一致性
                     fallback_output = x.to(device)
                     if fallback_output.size(-1) != self.hidden_dim:

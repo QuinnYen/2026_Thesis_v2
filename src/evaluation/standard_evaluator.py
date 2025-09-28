@@ -88,14 +88,21 @@ class StandardEvaluator:
         metrics['precision_macro'] = precision_score(y_true, y_pred, average='macro', zero_division=0)
         metrics['precision_micro'] = precision_score(y_true, y_pred, average='micro', zero_division=0)
         metrics['precision_weighted'] = precision_score(y_true, y_pred, average='weighted', zero_division=0)
-        
+
         metrics['recall_macro'] = recall_score(y_true, y_pred, average='macro', zero_division=0)
         metrics['recall_micro'] = recall_score(y_true, y_pred, average='micro', zero_division=0)
         metrics['recall_weighted'] = recall_score(y_true, y_pred, average='weighted', zero_division=0)
+
+        # 添加簡單的 precision 和 recall 鍵，使用宏平均作為默認值
+        metrics['precision'] = metrics['precision_macro']
+        metrics['recall'] = metrics['recall_macro']
         
         metrics['f1_macro'] = f1_score(y_true, y_pred, average='macro', zero_division=0)
         metrics['f1_micro'] = f1_score(y_true, y_pred, average='micro', zero_division=0)
         metrics['f1_weighted'] = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+
+        # 添加簡單的 f1 鍵，使用宏平均作為默認值
+        metrics['f1'] = metrics['f1_macro']
         
         # 各類別的詳細指標
         precision_per_class = precision_score(y_true, y_pred, average=None, zero_division=0)

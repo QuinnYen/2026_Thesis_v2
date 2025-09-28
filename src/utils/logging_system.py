@@ -158,9 +158,18 @@ class ExperimentLogger:
         self.info(f"總執行時間: {self._format_duration(duration)}")
         
         if final_results:
-            self.info("最終結果:")
+            self.info("最終結果摘要:")
+            # 只顯示關鍵摘要信息，不顯示詳細的model_performance等數據
             for key, value in final_results.items():
-                self.info(f"  {key}: {value}")
+                if key == 'experiment_info':
+                    self.info(f"  實驗名稱: {value.get('name', 'Unknown')}")
+                    self.info(f"  完成時間: {value.get('timestamp', 'Unknown')}")
+                    if 'total_experiments' in value:
+                        self.info(f"  總實驗數量: {value['total_experiments']}")
+                elif key in ['attention_mechanism_comparison', 'cross_domain_alignment']:
+                    # 只顯示這些關鍵結果存在，不顯示詳細內容
+                    self.info(f"  {key}: 已完成")
+                # 跳過 model_performance 等詳細數據
         
         self.info("=" * 60)
         
