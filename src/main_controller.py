@@ -265,8 +265,8 @@ class CrossDomainSentimentAnalysisController:
         # 數據分割
         self._split_datasets()
 
-        # 數據集標準化
-        self._standardize_datasets()
+        # 數據集標準化已禁用 - 保持原始分布的真實性
+        # self._standardize_datasets()
 
         self._data_loaded = True
         self.logger.info(f"數據集載入完成，共載入 {len(self.datasets)} 個數據集")
@@ -528,6 +528,55 @@ class CrossDomainSentimentAnalysisController:
             self.class_weights[dataset_name] = weight_dict
 
             self.logger.info(f"{dataset_name} 類別權重: {weight_dict}")
+
+    def _calculate_class_weights_for_training(self) -> Dict[int, float]:
+        """
+        計算訓練用的類別權重，合併所有數據集的統計信息
+        使用映射後的數字標籤而非原始情感標籤
+
+        Returns:
+            類別權重字典 (key為數字標籤)
+        """
+        from sklearn.utils.class_weight import compute_class_weight
+        import numpy as np
+        from collections import Counter
+
+        # 收集所有訓練數據的映射後標籤
+        all_mapped_labels = []
+        all_original_labels = []
+
+        for dataset_splits in self.datasets.values():
+            if 'train' in dataset_splits:
+                for item in dataset_splits['train']:
+                    original_label = item.sentiment
+                    mapped_label = self._sentiment_to_label(original_label)
+                    all_mapped_labels.append(mapped_label)
+                    all_original_labels.append(original_label)
+
+        if not all_mapped_labels:
+            return {}
+
+        # 統計原始和映射後的標籤分布
+        original_counts = Counter(all_original_labels)
+        mapped_counts = Counter(all_mapped_labels)
+        unique_mapped_labels = sorted(list(set(all_mapped_labels)))
+
+        self.logger.info(f"原始標籤分布: {dict(original_counts)}")
+        self.logger.info(f"映射後標籤分布: {dict(mapped_counts)}")
+
+        # 使用sklearn計算平衡權重（基於映射後的標籤）
+        weights = compute_class_weight(
+            'balanced',
+            classes=np.array(unique_mapped_labels),
+            y=np.array(all_mapped_labels)
+        )
+
+        # 創建權重字典（key為數字標籤）
+        class_weights = dict(zip(unique_mapped_labels, weights))
+
+        self.logger.info(f"計算的類別權重: {class_weights}")
+
+        return class_weights
 
     def _apply_label_mapping(self):
         """應用標籤映射標準化 (統一標籤體系)"""
@@ -981,6 +1030,12 @@ class CrossDomainSentimentAnalysisController:
             if 'train' in dataset_splits:
                 all_labels.update(item.sentiment for item in dataset_splits['train'])
         training_config['class_labels'] = sorted(list(all_labels))
+
+        # 計算類別權重來處理不平衡數據集
+        if training_config.get('use_class_weights', True):
+            class_weights = self._calculate_class_weights_for_training()
+            training_config['class_weights'] = class_weights
+            self.logger.info(f"使用類別權重處理不平衡數據: {class_weights}")
         results = {}
         
         # 對每個模型進行訓練

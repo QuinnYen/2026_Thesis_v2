@@ -70,7 +70,8 @@ class TrainingManager:
         # 評估器設置 (用於計算F1分數等詳細指標)
         # 動態確定類別標籤
         class_labels = config.get('class_labels', ['negative', 'neutral', 'positive'])
-        self.evaluator = StandardEvaluator(class_labels=class_labels)
+        # 禁用圖表保存，因為我們在主控制器中統一管理圖表輸出
+        self.evaluator = StandardEvaluator(class_labels=class_labels, save_plots=False)
         
         # 訓練歷史
         self.history = {
@@ -120,16 +121,32 @@ class TrainingManager:
     def _setup_criterion(self):
         """設置損失函數"""
         criterion_name = self.config.get('criterion', 'cross_entropy').lower()
-        
+
+        # 獲取類別權重 (如果有)
+        class_weights = self.config.get('class_weights', None)
+        if class_weights is not None:
+            # 轉換為tensor
+            if isinstance(class_weights, dict):
+                # 權重字典的key現在是數字標籤，按照標籤順序排列
+                num_classes = len(class_weights)
+                weight_list = []
+                for i in range(num_classes):
+                    weight_list.append(class_weights.get(i, 1.0))
+                weight_tensor = torch.tensor(weight_list, dtype=torch.float32, device=self.device)
+            else:
+                weight_tensor = torch.tensor(class_weights, dtype=torch.float32, device=self.device)
+        else:
+            weight_tensor = None
+
         if criterion_name == 'cross_entropy':
-            return nn.CrossEntropyLoss()
+            return nn.CrossEntropyLoss(weight=weight_tensor)
         elif criterion_name == 'focal':
-            return FocalLoss(alpha=1, gamma=2)
+            return FocalLoss(alpha=1, gamma=2, weight=weight_tensor)
         elif criterion_name == 'label_smoothing':
             smoothing = self.config.get('label_smoothing', 0.1)
-            return LabelSmoothingCrossEntropy(smoothing=smoothing)
+            return LabelSmoothingCrossEntropy(smoothing=smoothing, weight=weight_tensor)
         else:
-            return nn.CrossEntropyLoss()
+            return nn.CrossEntropyLoss(weight=weight_tensor)
     
     def _check_and_fix_model_dimensions(self, inputs):
         """檢查並修復模型維度不匹配問題"""
@@ -428,18 +445,19 @@ class EarlyStopping:
 
 class FocalLoss(nn.Module):
     """Focal Loss 實現"""
-    
-    def __init__(self, alpha: float = 1, gamma: float = 2, reduction: str = 'mean'):
+
+    def __init__(self, alpha: float = 1, gamma: float = 2, weight=None, reduction: str = 'mean'):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
+        self.weight = weight
         self.reduction = reduction
-    
+
     def forward(self, inputs, targets):
-        ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
+        ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
         pt = torch.exp(-ce_loss)
         focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-        
+
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
@@ -450,14 +468,20 @@ class FocalLoss(nn.Module):
 
 class LabelSmoothingCrossEntropy(nn.Module):
     """標籤平滑交叉熵損失"""
-    
-    def __init__(self, smoothing: float = 0.1):
+
+    def __init__(self, smoothing: float = 0.1, weight=None):
         super(LabelSmoothingCrossEntropy, self).__init__()
         self.smoothing = smoothing
-    
+        self.weight = weight
+
     def forward(self, inputs, targets):
         log_prob = nn.functional.log_softmax(inputs, dim=-1)
         weight = inputs.new_ones(inputs.size()) * self.smoothing / (inputs.size(-1) - 1.)
         weight.scatter_(-1, targets.unsqueeze(-1), (1. - self.smoothing))
-        loss = (-weight * log_prob).sum(dim=-1).mean()
-        return loss
+        loss = (-weight * log_prob).sum(dim=-1)
+
+        # 應用類別權重
+        if self.weight is not None:
+            loss = loss * self.weight[targets]
+
+        return loss.mean()

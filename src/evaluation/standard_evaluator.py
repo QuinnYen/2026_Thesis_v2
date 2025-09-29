@@ -44,8 +44,7 @@ class StandardEvaluator:
         self.save_plots = save_plots
         self.plot_dir = Path(plot_dir)
         
-        if self.save_plots:
-            self.plot_dir.mkdir(exist_ok=True)
+        # 目錄將在實際保存圖表時創建
         
         # 評估結果存儲
         self.evaluation_history = []
@@ -141,9 +140,20 @@ class StandardEvaluator:
         
         # 分類報告
         try:
+            # 動態確定實際出現的類別
+            unique_labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
+            # 使用對應的類別名稱，如果超出範圍則使用數字
+            actual_target_names = []
+            for label in unique_labels:
+                if label < len(self.class_labels):
+                    actual_target_names.append(self.class_labels[label])
+                else:
+                    actual_target_names.append(f"Class_{label}")
+
             class_report = classification_report(
-                y_true, y_pred, 
-                target_names=self.class_labels,
+                y_true, y_pred,
+                labels=unique_labels,
+                target_names=actual_target_names,
                 output_dict=True,
                 zero_division=0
             )
@@ -181,25 +191,45 @@ class StandardEvaluator:
             
             # 1. 混淆矩陣熱力圖
             plt.figure(figsize=(10, 8))
-            cm = confusion_matrix(y_true, y_pred)
+            # 使用與分類報告相同的動態標籤確定方式
+            unique_labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
+            actual_target_names = []
+            for label in unique_labels:
+                if label < len(self.class_labels):
+                    actual_target_names.append(self.class_labels[label])
+                else:
+                    actual_target_names.append(f"Class_{label}")
+
+            cm = confusion_matrix(y_true, y_pred, labels=unique_labels)
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                       xticklabels=self.class_labels, 
-                       yticklabels=self.class_labels)
+                       xticklabels=actual_target_names,
+                       yticklabels=actual_target_names)
             plt.title(f'混淆矩陣 - {domain_name}')
             plt.xlabel('預測標籤')
             plt.ylabel('真實標籤')
             plt.tight_layout()
+            self.plot_dir.mkdir(parents=True, exist_ok=True)
             plt.savefig(self.plot_dir / f'confusion_matrix_{domain_name}.png', dpi=300, bbox_inches='tight')
             plt.close()
             
             # 2. 各類別性能柱狀圖
             if 'classification_report' in metrics:
                 fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-                
-                class_names = self.class_labels
-                precision_values = [metrics.get(f'precision_{name}', 0) for name in class_names]
-                recall_values = [metrics.get(f'recall_{name}', 0) for name in class_names]
-                f1_values = [metrics.get(f'f1_{name}', 0) for name in class_names]
+
+                # 從分類報告中獲取實際的類別名稱和指標
+                class_report = metrics['classification_report']
+                class_names = []
+                precision_values = []
+                recall_values = []
+                f1_values = []
+
+                # 只提取類別指標，跳過總體統計
+                for key, value in class_report.items():
+                    if key not in ['accuracy', 'macro avg', 'weighted avg', 'micro avg'] and isinstance(value, dict):
+                        class_names.append(key)
+                        precision_values.append(value.get('precision', 0))
+                        recall_values.append(value.get('recall', 0))
+                        f1_values.append(value.get('f1-score', 0))
                 
                 # 精確率
                 axes[0].bar(class_names, precision_values, color='skyblue', alpha=0.7)
@@ -221,6 +251,7 @@ class StandardEvaluator:
                 
                 plt.suptitle(f'各類別性能指標 - {domain_name}')
                 plt.tight_layout()
+                self.plot_dir.mkdir(parents=True, exist_ok=True)
                 plt.savefig(self.plot_dir / f'class_performance_{domain_name}.png', dpi=300, bbox_inches='tight')
                 plt.close()
             
@@ -248,6 +279,7 @@ class StandardEvaluator:
                 plt.legend()
                 plt.grid(True, alpha=0.3)
                 plt.tight_layout()
+                self.plot_dir.mkdir(parents=True, exist_ok=True)
                 plt.savefig(self.plot_dir / f'roc_curve_{domain_name}.png', dpi=300, bbox_inches='tight')
                 plt.close()
                 
@@ -272,6 +304,7 @@ class StandardEvaluator:
                 plt.legend()
                 plt.grid(True, alpha=0.3)
                 plt.tight_layout()
+                self.plot_dir.mkdir(parents=True, exist_ok=True)
                 plt.savefig(self.plot_dir / f'precision_recall_curve_{domain_name}.png', dpi=300, bbox_inches='tight')
                 plt.close()
             
@@ -354,6 +387,7 @@ class StandardEvaluator:
                             ax.text(j, v + 0.01, f'{v:.3f}', ha='center', va='bottom')
                 
                 plt.tight_layout()
+                self.plot_dir.mkdir(parents=True, exist_ok=True)
                 plt.savefig(self.plot_dir / 'model_comparison_main_metrics.png', dpi=300, bbox_inches='tight')
                 plt.close()
             
@@ -378,6 +412,7 @@ class StandardEvaluator:
                 plt.legend()
                 plt.grid(True, alpha=0.3)
                 plt.tight_layout()
+                self.plot_dir.mkdir(parents=True, exist_ok=True)
                 plt.savefig(self.plot_dir / 'model_comparison_class_f1.png', dpi=300, bbox_inches='tight')
                 plt.close()
                 
