@@ -8,7 +8,7 @@ import string
 import unicodedata
 from typing import List, Dict, Tuple, Optional, Set
 import numpy as np
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from dataclasses import dataclass
 import spacy
 from spacy.lang.en import English
@@ -410,6 +410,131 @@ class DataSplitter:
         target_data = [sample for sample in data if sample.domain == target_domain]
         
         return source_data, target_data
+
+    @staticmethod
+    def stratified_k_fold_split(data: List[AspectSentiment],
+                               k_folds: int = 5,
+                               random_state: int = 42,
+                               stratify_by: str = 'sentiment',
+                               shuffle: bool = True) -> List[Tuple[List[AspectSentiment], List[AspectSentiment]]]:
+        """
+        分層 K-fold 交叉驗證分割
+
+        確保每個折都包含足夠的各類樣本，特別是 negative 樣本
+
+        Args:
+            data: AspectSentiment對象列表
+            k_folds: 折數，預設為 5
+            random_state: 隨機種子
+            stratify_by: 分層依據 ('sentiment', 'domain', 'category')
+            shuffle: 是否打亂數據
+
+        Returns:
+            List of (train_data, val_data) tuples for each fold
+        """
+        if not data:
+            return []
+
+        # 準備分層標籤
+        stratify_labels = []
+        if stratify_by == 'sentiment':
+            stratify_labels = [sample.sentiment for sample in data]
+        elif stratify_by == 'domain':
+            stratify_labels = [sample.domain for sample in data]
+        elif stratify_by == 'category':
+            stratify_labels = [sample.aspect_category for sample in data]
+        else:
+            raise ValueError(f"不支援的分層依據: {stratify_by}")
+
+        # 計算各類別的樣本數
+        from collections import Counter
+        label_counts = Counter(stratify_labels)
+        print(f"各類別樣本數: {dict(label_counts)}")
+
+        # 檢查是否有類別樣本數少於折數
+        min_samples = min(label_counts.values())
+        if min_samples < k_folds:
+            print(f"警告: 最小類別樣本數 ({min_samples}) 小於折數 ({k_folds})")
+            print("建議減少折數或增加樣本數")
+            k_folds = min_samples
+            print(f"自動調整折數為: {k_folds}")
+
+        # 建立分層 K-fold
+        skf = StratifiedKFold(
+            n_splits=k_folds,
+            shuffle=shuffle,
+            random_state=random_state
+        )
+
+        fold_splits = []
+        data_array = np.array(data)
+        labels_array = np.array(stratify_labels)
+
+        for fold_idx, (train_indices, val_indices) in enumerate(skf.split(data_array, labels_array)):
+            train_data = data_array[train_indices].tolist()
+            val_data = data_array[val_indices].tolist()
+
+            # 統計每個折的類別分佈
+            train_labels = labels_array[train_indices]
+            val_labels = labels_array[val_indices]
+
+            train_counts = Counter(train_labels)
+            val_counts = Counter(val_labels)
+
+            print(f"第 {fold_idx + 1} 折:")
+            print(f"  訓練集: {dict(train_counts)} (總計: {len(train_data)})")
+            print(f"  驗證集: {dict(val_counts)} (總計: {len(val_data)})")
+
+            # 檢查 negative 樣本分佈
+            if 'negative' in train_counts and 'negative' in val_counts:
+                neg_train_ratio = train_counts['negative'] / len(train_data)
+                neg_val_ratio = val_counts['negative'] / len(val_data)
+                print(f"  Negative 比例 - 訓練集: {neg_train_ratio:.3f}, 驗證集: {neg_val_ratio:.3f}")
+
+            fold_splits.append((train_data, val_data))
+
+        return fold_splits
+
+    @staticmethod
+    def analyze_class_distribution(data: List[AspectSentiment],
+                                 stratify_by: str = 'sentiment') -> Dict:
+        """
+        分析類別分佈情況
+
+        Args:
+            data: AspectSentiment對象列表
+            stratify_by: 分析依據
+
+        Returns:
+            類別分佈統計資訊
+        """
+        if not data:
+            return {}
+
+        # 提取標籤
+        if stratify_by == 'sentiment':
+            labels = [sample.sentiment for sample in data]
+        elif stratify_by == 'domain':
+            labels = [sample.domain for sample in data]
+        elif stratify_by == 'category':
+            labels = [sample.aspect_category for sample in data]
+        else:
+            raise ValueError(f"不支援的分析依據: {stratify_by}")
+
+        from collections import Counter
+        label_counts = Counter(labels)
+        total_samples = len(data)
+
+        distribution_info = {
+            'total_samples': total_samples,
+            'class_counts': dict(label_counts),
+            'class_ratios': {k: v/total_samples for k, v in label_counts.items()},
+            'min_class_size': min(label_counts.values()),
+            'max_class_size': max(label_counts.values()),
+            'imbalance_ratio': max(label_counts.values()) / min(label_counts.values())
+        }
+
+        return distribution_info
 
 
 class AspectDataPreprocessor:

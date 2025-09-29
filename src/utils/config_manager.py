@@ -90,7 +90,7 @@ class ConfigManager:
                 'bert_model': 'bert-base-uncased',
                 'hidden_size': 768,
                 'num_attention_heads': 12,
-                'dropout': 0.1,
+                'dropout': 0.3,
                 'num_classes': 3  # positive, negative, neutral
             },
             
@@ -99,8 +99,8 @@ class ConfigManager:
                 'learning_rate': 2e-5,
                 'num_epochs': 10,
                 'warmup_steps': 500,
-                'weight_decay': 0.01,
-                'early_stopping_patience': 3,
+                'weight_decay': 0.05,
+                'early_stopping_patience': 2,
                 'gradient_clip_norm': 1.0
             },
             
