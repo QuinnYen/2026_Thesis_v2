@@ -57,9 +57,16 @@ from data import (
 )
 from models import (
     AspectAwareBERTEncoder, MultiModalFeatureFusion,
-    MultiAttentionCombiner, MLPClassifier, 
-    AttentionEnhancedClassifier, AttentionComparisonClassifier, 
+    MultiAttentionCombiner, MLPClassifier,
+    AttentionEnhancedClassifier, AttentionComparisonClassifier,
     CrossDomainClassifier, TrainingManager, ModelCache
+)
+from visualization import (
+    ResultVisualizer, AttentionVisualizer, SemanticSpaceVisualizer
+)
+from evaluation import (
+    StandardEvaluator, CrossDomainEvaluator,
+    StatisticalAnalyzer, ErrorAnalyzer
 )
 
 
@@ -780,6 +787,17 @@ class CrossDomainSentimentAnalysisController:
         if not self._components_initialized:
             self.initialize_components()
         
+        # 檢查是否啟用K折交叉驗證
+        training_config = self.config.get('training', {})
+        use_k_fold = training_config.get('use_k_fold_cv', False)
+        k_folds = training_config.get('k_folds', 5)
+        
+        if use_k_fold:
+            self.logger.info(f"啟用K折交叉驗證 (K={k_folds})")
+            self._setup_k_fold_datasets(k_folds)
+        else:
+            self.logger.info("使用傳統train/val/test分割")
+        
         preprocessed_data = {}
         
         for dataset_name, dataset_splits in self.datasets.items():
@@ -849,13 +867,16 @@ class CrossDomainSentimentAnalysisController:
         
         self._features_extracted = True
         self.logger.info("特徵提取完成")
-        
+
+        # 建立 sentence_id 到特徵向量的快取映射
+        self._build_feature_cache()
+
         # 初始化跨領域對齊器數據
         self._initialize_cross_domain_alignment()
-        
+
         # 生成特徵分佈視覺化
         self._visualize_feature_distribution()
-        
+
         return self.features
     
     def _fit_feature_extractors(self):
@@ -881,7 +902,29 @@ class CrossDomainSentimentAnalysisController:
             self.logger.info("特徵提取器訓練完成")
         else:
             self.logger.warning("沒有找到訓練數據，無法訓練特徵提取器")
-    
+
+    def _build_feature_cache(self):
+        """建立 sentence_id 到特徵向量的快取映射，用於 K-fold 訓練"""
+        self.logger.info("建立特徵快取映射...")
+        self.feature_cache = {}
+
+        for dataset_name, dataset_splits in self.datasets.items():
+            if dataset_name not in self.feature_cache:
+                self.feature_cache[dataset_name] = {}
+
+            for split_name, split_data in dataset_splits.items():
+                # 確保對應的特徵存在
+                if dataset_name in self.features and split_name in self.features[dataset_name]:
+                    features = self.features[dataset_name][split_name]['features']
+
+                    # 為每個樣本建立 sentence_id -> feature 的映射
+                    for sample, feature in zip(split_data, features):
+                        if hasattr(sample, 'sentence_id'):
+                            self.feature_cache[dataset_name][sample.sentence_id] = feature
+
+        total_cached = sum(len(cache) for cache in self.feature_cache.values())
+        self.logger.info(f"特徵快取建立完成，共快取 {total_cached} 個特徵向量")
+
     def _initialize_cross_domain_alignment(self):
         """初始化跨領域對齊器數據"""
         self.logger.info("初始化跨領域對齊器...")
@@ -911,11 +954,15 @@ class CrossDomainSentimentAnalysisController:
         """將情感標籤轉換為數字"""
         sentiment_map = {
             'positive': 2,
-            'neutral': 1, 
+            'neutral': 1,
             'negative': 0,
             'conflict': 1  # 將衝突標籤映射到中性類別
         }
         return sentiment_map.get(sentiment.lower(), 1)
+
+    def _map_sentiment_to_int(self, sentiment: str) -> int:
+        """將情感標籤映射為整數（與_sentiment_to_label相同）"""
+        return self._sentiment_to_label(sentiment)
     
     def _get_num_classes(self) -> int:
         """動態檢測數據集中的類別數量"""
@@ -1033,15 +1080,31 @@ class CrossDomainSentimentAnalysisController:
                 fusion_strategy=model_config.get('fusion_strategy', 'attention'),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
-            
+
             classifier = MLPClassifier(
                 input_dim=model_config.get('fusion_dim', 512),
                 num_classes=num_classes,
                 hidden_dims=model_config.get('fusion_classifier_dims', [256]),
                 dropout_rate=model_config.get('dropout_rate', 0.1)
             )
-            
-            models['multilevel_fusion'] = nn.Sequential(fusion_model, classifier)
+
+            # 創建包裝器，確保只傳遞 fused_features 給分類器
+            class FusionClassifierWrapper(nn.Module):
+                def __init__(self, fusion, classifier):
+                    super().__init__()
+                    self.fusion = fusion
+                    self.classifier = classifier
+
+                def forward(self, x):
+                    fusion_output = self.fusion(x)
+                    # 只提取 fused_features，避免傳遞整個字典
+                    if isinstance(fusion_output, dict) and 'fused_features' in fusion_output:
+                        fused = fusion_output['fused_features']
+                    else:
+                        fused = fusion_output
+                    return self.classifier(fused)
+
+            models['multilevel_fusion'] = FusionClassifierWrapper(fusion_model, classifier)
         
         self.models = models
         self.logger.info(f"模型構建完成，共構建 {len(models)} 個模型")
@@ -1174,9 +1237,6 @@ class CrossDomainSentimentAnalysisController:
         if not self.models:
             self.build_models()
         
-        if not self.data_loaders:
-            self.create_data_loaders()
-        
         training_config = self.config.get('training', {
             'epochs': 10,
             'learning_rate': 0.001,
@@ -1199,6 +1259,21 @@ class CrossDomainSentimentAnalysisController:
             class_weights = self._calculate_class_weights_for_training()
             training_config['class_weights'] = class_weights
             self.logger.info(f"使用類別權重處理不平衡數據: {class_weights}")
+        
+        # 檢查是否使用K折交叉驗證
+        use_k_fold = training_config.get('use_k_fold_cv', False)
+        
+        if use_k_fold and hasattr(self, 'k_fold_datasets') and self.k_fold_datasets:
+            self.logger.info("使用K折交叉驗證進行訓練")
+            return self._train_with_k_fold(training_config)
+        else:
+            self.logger.info("使用傳統train/val/test分割進行訓練")
+            if not self.data_loaders:
+                self.create_data_loaders()
+            return self._train_traditional(training_config)
+    
+    def _train_traditional(self, training_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """使用傳統方法訓練模型"""
         results = {}
         
         # 對每個模型進行訓練
@@ -1250,6 +1325,276 @@ class CrossDomainSentimentAnalysisController:
         self._visualize_training_results(results)
         
         return results
+    
+    def _train_with_k_fold(self, training_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """使用K折交叉驗證訓練模型"""
+        results = {}
+        
+        for model_name, model in self.models.items():
+            self.logger.info(f"K折訓練模型: {model_name}")
+            model_results = {}
+            
+            for dataset_name, fold_splits in self.k_fold_datasets.items():
+                self.logger.info(f"在數據集 {dataset_name} 上進行K折訓練")
+                fold_results = []
+                
+                for fold_idx, (train_data, val_data) in enumerate(fold_splits):
+                    self.logger.info(f"訓練第 {fold_idx + 1} 折，訓練樣本: {len(train_data)}, 驗證樣本: {len(val_data)}")
+                    
+                    try:
+                        # 創建該折的數據載入器
+                        fold_loaders = self._create_fold_data_loaders(
+                            train_data, val_data, dataset_name
+                        )
+                        
+                        # 重新初始化模型（每折使用新的模型實例）
+                        fresh_model = self._create_fresh_model_instance(model_name, model)
+                        
+                        # 訓練該折
+                        trainer = TrainingManager(
+                            model=fresh_model,
+                            train_loader=fold_loaders['train'],
+                            val_loader=fold_loaders['val'],
+                            config=training_config
+                        )
+                        
+                        fold_history = trainer.train(
+                            epochs=training_config.get('epochs', 10)
+                        )
+                        fold_metrics = trainer.validate_epoch()
+                        
+                        fold_results.append({
+                            'fold': fold_idx + 1,
+                            'history': fold_history,
+                            'metrics': fold_metrics
+                        })
+                        
+                        self.logger.info(f"第 {fold_idx + 1} 折完成，準確率: {fold_metrics.get('accuracy', 0):.4f}")
+                        
+                    except Exception as e:
+                        self.logger.error(f"第 {fold_idx + 1} 折訓練失敗: {str(e)}")
+                        continue
+                
+                # 計算K折平均結果
+                if fold_results:
+                    avg_results = self._compute_k_fold_average(fold_results)
+                    model_results[dataset_name] = avg_results
+                    # 從 test_metrics 中獲取平均準確率
+                    avg_acc = avg_results.get('test_metrics', {}).get('accuracy', 0)
+                    self.logger.info(f"{dataset_name} K折平均準確率: {avg_acc:.4f}")
+                else:
+                    self.logger.error(f"{dataset_name} 所有折都訓練失敗")
+            
+            results[model_name] = model_results
+        
+        self.experiment_results['training'] = results
+        self.logger.info("K折模型訓練完成")
+        
+        return results
+    
+    def _create_fold_data_loaders(self, train_data, val_data, dataset_name):
+        """為K折創建數據載入器"""
+        from torch.utils.data import DataLoader
+
+        # 提取特徵（如果還沒有提取）
+        if not self._features_extracted:
+            self.extract_features()
+
+        # 獲取特徵和標籤
+        train_features = []
+        train_labels = []
+        train_metadata = []
+
+        # 處理訓練數據
+
+        for sample in train_data:
+            # 從preprocessed_data中找到對應的特徵
+            feature_vector = self._find_feature_for_sample(sample, dataset_name)
+            if feature_vector is not None:
+                train_features.append(feature_vector)
+                train_labels.append(self._map_sentiment_to_int(sample.sentiment))
+                train_metadata.append({
+                    'sentence_id': sample.sentence_id,
+                    'domain': sample.domain,
+                    'aspect_category': sample.aspect_category
+                })
+
+        val_features = []
+        val_labels = []
+        val_metadata = []
+
+        # 處理驗證數據
+
+        for sample in val_data:
+            feature_vector = self._find_feature_for_sample(sample, dataset_name)
+            if feature_vector is not None:
+                val_features.append(feature_vector)
+                val_labels.append(self._map_sentiment_to_int(sample.sentiment))
+                val_metadata.append({
+                    'sentence_id': sample.sentence_id,
+                    'domain': sample.domain,
+                    'aspect_category': sample.aspect_category
+                })
+
+        # 顯示匹配結果
+        self.logger.info(f"K折數據載入器 - 訓練: {len(train_features)}, 驗證: {len(val_features)}")
+
+        # 檢查是否有空的特徵集合
+        if len(train_features) == 0:
+            raise ValueError(f"無法為 {dataset_name} 創建訓練數據：沒有找到匹配的特徵")
+        if len(val_features) == 0:
+            raise ValueError(f"無法為 {dataset_name} 創建驗證數據：沒有找到匹配的特徵")
+
+        # 創建數據集
+        train_dataset = SentimentDataset(train_features, train_labels, train_metadata)
+        val_dataset = SentimentDataset(val_features, val_labels, val_metadata)
+
+        # 創建數據載入器
+        batch_size = self.config.get('data', {}).get('batch_size', 32)
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0
+        )
+        
+        return {'train': train_loader, 'val': val_loader}
+    
+    def _find_feature_for_sample(self, sample, dataset_name):
+        """為樣本找到對應的特徵向量"""
+        # 優先使用特徵快取查找（最快速且準確）
+        if hasattr(self, 'feature_cache') and self.feature_cache:
+            if dataset_name in self.feature_cache:
+                if hasattr(sample, 'sentence_id') and sample.sentence_id in self.feature_cache[dataset_name]:
+                    return self.feature_cache[dataset_name][sample.sentence_id]
+
+        # 如果快取中找不到，從features中按索引查找
+        if hasattr(self, 'features') and self.features:
+            if dataset_name in self.features:
+                # 遍歷所有分割查找匹配的樣本
+                for split_name, split_data in self.features[dataset_name].items():
+                    if isinstance(split_data, dict):
+                        features = split_data.get('features', [])
+                        # 檢查原始數據，通過索引匹配
+                        if dataset_name in self.datasets and split_name in self.datasets[dataset_name]:
+                            original_samples = self.datasets[dataset_name][split_name]
+                            for idx, original_sample in enumerate(original_samples):
+                                if (hasattr(original_sample, 'sentence_id') and
+                                    hasattr(sample, 'sentence_id') and
+                                    original_sample.sentence_id == sample.sentence_id and
+                                    idx < len(features)):
+                                    return features[idx]
+
+        # 如果找不到匹配的特徵，嘗試重新提取
+        self.logger.warning(f"無法找到樣本 {sample.sentence_id} 的特徵，嘗試即時提取")
+        return self._extract_feature_for_sample(sample)
+
+    def _extract_feature_for_sample(self, sample):
+        """為單個樣本即時提取特徵"""
+        try:
+            if hasattr(self, 'multi_level_extractor') and self.multi_level_extractor:
+                # 創建臨時數據結構
+                temp_original = [sample]
+
+                # 使用現有的預處理器處理數據
+                if hasattr(self, 'preprocessor') and self.preprocessor:
+                    temp_processed = self.preprocessor.preprocess_dataset(temp_original)
+                else:
+                    # 如果預處理器不存在，初始化一個
+                    self.logger.warning("預處理器未初始化，創建臨時預處理器")
+                    from data import AspectDataPreprocessor
+                    temp_preprocessor = AspectDataPreprocessor()
+                    temp_processed = temp_preprocessor.preprocess_dataset(temp_original)
+
+                # 使用multi_level_extractor提取特徵
+                features_result = self.multi_level_extractor.extract_features(
+                    data=temp_original,
+                    processed_data=temp_processed,
+                    batch_size=1
+                )
+
+                if features_result and len(features_result) > 0:
+                    # 返回第一個特徵
+                    return features_result[0]
+
+        except Exception as e:
+            self.logger.error(f"即時特徵提取失敗: {e}")
+
+        # 如果所有方法都失敗，創建一個零向量作為fallback
+        try:
+            # 假設特徵維度為768（BERT默認）
+            import torch
+            fallback_feature = torch.zeros(768)
+            self.logger.warning(f"為樣本 {sample.sentence_id} 創建零向量特徵")
+            return fallback_feature
+        except:
+            return None
+
+    def _create_fresh_model_instance(self, model_name, original_model):
+        """創建模型的新實例"""
+        import copy
+        
+        # 深拷貝模型架構但重新初始化參數
+        fresh_model = copy.deepcopy(original_model)
+        
+        # 重新初始化所有參數
+        def init_weights(m):
+            if hasattr(m, 'weight') and m.weight.dim() > 1:
+                torch.nn.init.xavier_uniform_(m.weight)
+            if hasattr(m, 'bias') and m.bias is not None:
+                torch.nn.init.constant_(m.bias, 0)
+        
+        fresh_model.apply(init_weights)
+        return fresh_model
+    
+    def _compute_k_fold_average(self, fold_results):
+        """計算K折結果的平均值"""
+        if not fold_results:
+            return {}
+        
+        # 收集所有指標
+        all_metrics = {}
+        for fold_result in fold_results:
+            metrics = fold_result.get('metrics', {})
+            for metric_name, metric_value in metrics.items():
+                if isinstance(metric_value, (int, float)):
+                    if metric_name not in all_metrics:
+                        all_metrics[metric_name] = []
+                    all_metrics[metric_name].append(metric_value)
+
+        # 計算平均值和標準差
+        import numpy as np
+
+        # 構建與傳統訓練相同的結構
+        test_metrics = {}
+        for metric_name, values in all_metrics.items():
+            # 將平均值作為 test_metrics 中的主要指標
+            test_metrics[metric_name] = np.mean(values)
+            # 同時保留標準差信息
+            test_metrics[f'{metric_name}_std'] = np.std(values)
+
+        # 返回與傳統訓練相同的結構
+        result = {
+            'test_metrics': test_metrics,
+            'k_fold_info': {
+                'num_folds': len(fold_results),
+                'fold_results': fold_results
+            }
+        }
+
+        # 為了向後兼容，也添加 avg_ 前綴的指標
+        for metric_name, values in all_metrics.items():
+            result[f'avg_{metric_name}'] = np.mean(values)
+            result[f'std_{metric_name}'] = np.std(values)
+
+        return result
     
     def evaluate_cross_domain_alignment(self) -> Dict[str, Any]:
         """
@@ -1341,7 +1686,7 @@ class CrossDomainSentimentAnalysisController:
         # 保存報告
         self._save_experiment_report(report)
         
-        # HTML 報告生成已移除，僅保留 JSON 報告
+        # 保留 JSON 格式的實驗結果報告
         
         self.logger.info("實驗報告生成完成")
         return report
@@ -2727,7 +3072,7 @@ class CrossDomainSentimentAnalysisController:
                         cohesion = alignment_results['average_cohesion']
                         summary_text += f"\n• 平均內聚性: {cohesion:.3f}\n"
                         if cohesion > 0.7:
-                            summary_text += "  ✓ 良好的面向對齊\n"
+                            summary_text += "  [良好] 良好的面向對齊\n"
                         elif cohesion > 0.5:
                             summary_text += "  ⚠ 中等的面向對齊\n"
                         else:
@@ -3158,7 +3503,7 @@ class CrossDomainSentimentAnalysisController:
         with open(exp1_output_dir / 'experiment_1_results.json', 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False, default=str)
 
-        print(f"✓ 實驗一完成，結果保存至：{exp1_output_dir}")
+        print(f"[完成] 實驗一完成，結果保存至：{exp1_output_dir}")
         return results
 
     def _run_experiment_2_attention_mechanisms(self) -> Dict[str, Any]:
@@ -3185,7 +3530,7 @@ class CrossDomainSentimentAnalysisController:
         with open(exp2_output_dir / 'experiment_2_results.json', 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False, default=str)
 
-        print(f"✓ 實驗二完成，結果保存至：{exp2_output_dir}")
+        print(f"[完成] 實驗二完成，結果保存至：{exp2_output_dir}")
         return results
 
     def _run_experiment_3_combination_baseline(self) -> Dict[str, Any]:
@@ -3212,7 +3557,7 @@ class CrossDomainSentimentAnalysisController:
         with open(exp3_output_dir / 'experiment_3_results.json', 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False, default=str)
 
-        print(f"✓ 實驗三完成，結果保存至：{exp3_output_dir}")
+        print(f"[完成] 實驗三完成，結果保存至：{exp3_output_dir}")
         return results
 
     def _generate_integrated_experiment_report(self, all_experiments: Dict[str, Any]) -> Dict[str, Any]:
@@ -3239,7 +3584,7 @@ class CrossDomainSentimentAnalysisController:
         if 'experiment_3' in all_experiments:
             integrated_report['cross_domain_alignment'] = all_experiments['experiment_3']['results'].get('cross_domain_alignment', {})
 
-        # 生成可視化和HTML報告
+        # 生成可視化圖表
         final_report = self.generate_experiment_report()
 
         # 將整合的實驗資訊加入最終報告
@@ -3250,7 +3595,7 @@ class CrossDomainSentimentAnalysisController:
         with open(main_output_dir / 'integrated_experiment_report.json', 'w', encoding='utf-8') as f:
             json.dump(final_report, f, indent=2, ensure_ascii=False, default=str)
 
-        print(f"✓ 整合報告完成，結果保存至：{main_output_dir}")
+        print(f"[完成] 整合報告完成，結果保存至：{main_output_dir}")
         return final_report
 
 
@@ -3381,7 +3726,7 @@ def main(config_path: Optional[str] = None):
             for exp_key, exp_data in results['experiments'].items():
                 exp_name = exp_data['name']
                 exp_desc = exp_data['description']
-                print(f"  ✓ {exp_name}")
+                print(f"  [完成] {exp_name}")
                 print(f"    {exp_desc}")
 
         # 實驗一：模型架構比較結果
@@ -3455,19 +3800,12 @@ def main(config_path: Optional[str] = None):
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="跨領域情感分析實驗系統")
-    parser.add_argument('--config', type=str, default=None,
-                       help='配置文件路徑')
-
-    args = parser.parse_args()
-
     # 顯示運行模式
     print("="*60)
     print("跨領域情感分析實驗系統")
     print("="*60)
+    print("直接運行所有實驗（使用默認配置）")
     print("="*60)
 
-    # 運行主程序
-    main(config_path=args.config)
+    # 直接運行主程序，使用默認配置
+    main(config_path=None)

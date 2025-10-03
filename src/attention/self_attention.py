@@ -14,37 +14,54 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional, Union
+from typing import Tuple, Optional, Union, Dict, Any
 import math
+from .regularized_attention import AttentionRegularizer
 
 
 class BasicSelfAttention(nn.Module):
     """基礎自注意力機制"""
     
-    def __init__(self, hidden_dim: int, dropout: float = 0.1):
+    def __init__(self,
+                 hidden_dim: int,
+                 dropout: float = 0.1,
+                 regularization_config: Optional[Dict[str, Any]] = None):
         """
         初始化基礎自注意力
-        
+
         Args:
             hidden_dim: 隱藏層維度
             dropout: Dropout 比率
+            regularization_config: 正則化配置
         """
         super(BasicSelfAttention, self).__init__()
         self.hidden_dim = hidden_dim
-        
+
         # 線性變換層
         self.query_projection = nn.Linear(hidden_dim, hidden_dim)
         self.key_projection = nn.Linear(hidden_dim, hidden_dim)
         self.value_projection = nn.Linear(hidden_dim, hidden_dim)
-        
+
         # 輸出投影層
         self.output_projection = nn.Linear(hidden_dim, hidden_dim)
-        
+
         # Dropout 層
         self.dropout = nn.Dropout(dropout)
-        
+
         # Layer Normalization
         self.layer_norm = nn.LayerNorm(hidden_dim)
+
+        # 正則化設定
+        self.regularization_config = regularization_config or {}
+        self.use_regularization = any(
+            config.get('enabled', False)
+            for config in self.regularization_config.values()
+            if isinstance(config, dict)
+        )
+
+        # 儲存注意力權重和正則化損失
+        self.attention_weights = None
+        self.regularization_losses = {}
     
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -67,25 +84,128 @@ class BasicSelfAttention(nn.Module):
         
         # 計算注意力分數
         attention_scores = torch.matmul(query, key.transpose(-2, -1))  # [batch_size, seq_len, seq_len]
-        
+
         # 應用遮罩
         if mask is not None:
             attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
-        
+
         # Softmax 正規化
         attention_weights = F.softmax(attention_scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
-        
+
+        # 儲存注意力權重
+        self.attention_weights = attention_weights.detach()
+
+        # 計算正則化損失
+        if self.training and self.use_regularization:
+            self._compute_regularization_losses(attention_weights)
+
         # 計算加權輸出
         context = torch.matmul(attention_weights, value)  # [batch_size, seq_len, hidden_dim]
-        
+
         # 輸出投影
         output = self.output_projection(context)
-        
+
         # 殘差連接和層正規化
         output = self.layer_norm(output + x)
-        
+
         return output, attention_weights
+
+    def _compute_regularization_losses(self, attention_weights: torch.Tensor):
+        """計算正則化損失"""
+        self.regularization_losses.clear()
+
+        # 由於現有的注意力模組是 2D 的，我們需要添加 head 維度
+        # 將 [batch_size, seq_len, seq_len] 擴展為 [batch_size, 1, seq_len, seq_len]
+        expanded_weights = attention_weights.unsqueeze(1)
+        seq_len = attention_weights.size(-1)
+
+        # 使用正則化器計算損失
+        config = self.regularization_config
+
+        if config.get('entropy_reg', {}).get('enabled', False):
+            entropy_config = config['entropy_reg']
+            entropy_loss = self._compute_entropy_regularization(
+                expanded_weights, entropy_config
+            )
+            self.regularization_losses['entropy'] = entropy_loss
+
+        if config.get('sparsity_reg', {}).get('enabled', False):
+            sparsity_config = config['sparsity_reg']
+            sparsity_loss = self._compute_sparsity_regularization(
+                expanded_weights, sparsity_config
+            )
+            self.regularization_losses['sparsity'] = sparsity_loss
+
+        if config.get('locality_reg', {}).get('enabled', False):
+            locality_config = config['locality_reg']
+            locality_loss = self._compute_locality_regularization(
+                expanded_weights, seq_len, locality_config
+            )
+            self.regularization_losses['locality'] = locality_loss
+
+    def _compute_entropy_regularization(self, attention_weights: torch.Tensor, config: Dict) -> torch.Tensor:
+        """計算熵正則化損失"""
+        eps = 1e-8
+        attention_weights_safe = attention_weights + eps
+        entropy = -torch.sum(attention_weights_safe * torch.log(attention_weights_safe), dim=-1)
+        mean_entropy = entropy.mean()
+
+        weight = config.get('weight', 0.01)
+        target_entropy = config.get('target_entropy')
+
+        if target_entropy is not None:
+            entropy_loss = weight * torch.abs(mean_entropy - target_entropy)
+        else:
+            entropy_loss = -weight * mean_entropy
+
+        return entropy_loss
+
+    def _compute_sparsity_regularization(self, attention_weights: torch.Tensor, config: Dict) -> torch.Tensor:
+        """計算稀疏性正則化損失"""
+        weight = config.get('weight', 0.01)
+        sparsity_type = config.get('type', 'l1')
+
+        if sparsity_type == 'l1':
+            sparsity_loss = weight * torch.sum(attention_weights)
+        elif sparsity_type == 'l2':
+            sparsity_loss = weight * torch.sum(attention_weights ** 2)
+        else:
+            # 預設使用 L1
+            sparsity_loss = weight * torch.sum(attention_weights)
+
+        return sparsity_loss
+
+    def _compute_locality_regularization(self, attention_weights: torch.Tensor, seq_len: int, config: Dict) -> torch.Tensor:
+        """計算局部性正則化損失"""
+        weight = config.get('weight', 0.01)
+        window_size = config.get('window_size', 5)
+
+        device = attention_weights.device
+        positions = torch.arange(seq_len, device=device).unsqueeze(1).float()
+        position_diff = torch.abs(positions - positions.T)
+        distance_weights = torch.exp(-position_diff / window_size)
+        distance_weights = distance_weights.unsqueeze(0).unsqueeze(0)
+
+        eps = 1e-8
+        attention_safe = attention_weights + eps
+        distance_safe = distance_weights + eps
+        distance_weights_norm = distance_weights / distance_weights.sum(dim=-1, keepdim=True)
+
+        kl_div = torch.sum(attention_safe * torch.log(attention_safe / (distance_weights_norm + eps)), dim=-1)
+        locality_loss = weight * kl_div.mean()
+
+        return locality_loss
+
+    def get_regularization_losses(self) -> Dict[str, torch.Tensor]:
+        """獲取所有正則化損失"""
+        return self.regularization_losses.copy()
+
+    def get_total_regularization_loss(self) -> torch.Tensor:
+        """獲取總正則化損失"""
+        if not self.regularization_losses:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        return sum(self.regularization_losses.values())
 
 
 class ScaledDotProductSelfAttention(nn.Module):

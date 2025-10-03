@@ -24,6 +24,13 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from evaluation.standard_evaluator import StandardEvaluator
 
+# 導入注意力監控器
+try:
+    from monitoring.attention_monitor import AttentionMonitor
+except ImportError:
+    # 如果導入失敗，設置為None，允許程序繼續運行但不啟用監控
+    AttentionMonitor = None
+
 
 class TrainingManager:
     """訓練管理器"""
@@ -80,6 +87,27 @@ class TrainingManager:
             'train_acc': [],
             'val_acc': []
         }
+
+        # 注意力監控器設置
+        self.attention_monitor = None
+        if (AttentionMonitor is not None and
+            config.get('enable_attention_monitoring', False)):
+            try:
+                monitor_config = config.get('attention_monitoring', {})
+                output_dir = config.get('monitoring_output_dir', 'monitoring_output')
+                tensorboard_dir = config.get('tensorboard_log_dir', None)
+
+                self.attention_monitor = AttentionMonitor(
+                    config=monitor_config,
+                    output_dir=output_dir,
+                    tensorboard_log_dir=tensorboard_dir,
+                    save_frequency=config.get('monitoring_save_frequency', 100),
+                    history_window=config.get('monitoring_history_window', 1000)
+                )
+                print(f"注意力監控器已啟用，輸出目錄: {output_dir}")
+            except Exception as e:
+                print(f"注意力監控器初始化失敗: {e}")
+                self.attention_monitor = None
     
     def _setup_optimizer(self) -> optim.Optimizer:
         """設置優化器"""
@@ -222,9 +250,10 @@ class TrainingManager:
         total_loss = 0
         correct_predictions = 0
         total_samples = 0
-        
+
         first_batch = True
-        
+        batch_count = 0
+
         for batch in self.train_loader:
             # 移動數據到設備
             if isinstance(batch['features'], dict):
@@ -257,14 +286,32 @@ class TrainingManager:
                         raise retry_e
                 else:
                     raise e
-            
+
             # 計算損失
             if isinstance(outputs, dict):
                 logits = outputs['logits']
+                attention_weights = outputs.get('attention_weights', None)
             else:
                 logits = outputs
-            
+                attention_weights = None
+
             loss = self.criterion(logits, labels)
+
+            # 注意力監控更新
+            if self.attention_monitor and attention_weights is not None:
+                try:
+                    predictions = torch.argmax(logits, dim=-1)
+                    accuracy = (predictions == labels).float().mean().item()
+
+                    self.attention_monitor.update(
+                        attention_weights=attention_weights,
+                        step=batch_count,
+                        loss=loss.item(),
+                        accuracy=accuracy
+                    )
+                except Exception as e:
+                    # 監控失敗不應該影響訓練過程
+                    pass
             
             # 反向傳播
             loss.backward()
@@ -280,6 +327,7 @@ class TrainingManager:
             predictions = torch.argmax(logits, dim=-1)
             correct_predictions += (predictions == labels).sum().item()
             total_samples += labels.size(0)
+            batch_count += 1
         
         avg_loss = total_loss / len(self.train_loader)
         accuracy = correct_predictions / total_samples
@@ -363,6 +411,25 @@ class TrainingManager:
             # 驗證階段
             val_metrics = self.validate_epoch()
 
+            # 更新注意力監控器的epoch信息
+            if self.attention_monitor:
+                try:
+                    # 在驗證階段更新epoch級別的監控
+                    self.attention_monitor.update(
+                        attention_weights=torch.randn(1, 8, 10, 10),  # 佔位符，實際會在batch級別更新
+                        step=None,
+                        epoch=epoch,
+                        loss=train_metrics['loss'],
+                        accuracy=train_metrics['accuracy'],
+                        additional_metrics={
+                            'val_loss': val_metrics['loss'],
+                            'val_accuracy': val_metrics['accuracy']
+                        }
+                    )
+                except Exception as e:
+                    # 監控失敗不應該影響訓練過程
+                    pass
+
             # 更新進度條顯示
             pbar.set_postfix({
                 'Train Loss': f"{train_metrics['loss']:.4f}",
@@ -370,24 +437,32 @@ class TrainingManager:
                 'Val Loss': f"{val_metrics['loss']:.4f}",
                 'Val Acc': f"{val_metrics['accuracy']:.4f}"
             })
-            
+
             # 更新歷史
             self.history['train_loss'].append(train_metrics['loss'])
             self.history['val_loss'].append(val_metrics['loss'])
             self.history['train_acc'].append(train_metrics['accuracy'])
             self.history['val_acc'].append(val_metrics['accuracy'])
-            
+
             # 學習率調度
             if isinstance(self.scheduler, ReduceLROnPlateau):
                 self.scheduler.step(val_metrics['loss'])
             else:
                 self.scheduler.step()
-            
+
             # 早停檢查
             if self.early_stopping(val_metrics['loss'], self.model):
                 print(f"\\n早停觸發，在第 {epoch + 1} epoch 停止訓練")
                 break
-        
+
+        # 生成最終監控報告
+        if self.attention_monitor:
+            try:
+                final_report = self.attention_monitor.generate_report()
+                print(f"注意力監控報告已生成")
+            except Exception as e:
+                print(f"生成監控報告失敗: {e}")
+
         return self.history
     
     def save_checkpoint(self, filepath: str):

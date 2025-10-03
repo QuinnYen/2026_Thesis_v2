@@ -376,10 +376,10 @@ class ResultVisualizer:
             showlegend=True,
             height=800
         )
-        
+
         if self.save_plots:
-            fig.write_html(str(self.plot_dir / f'{title.replace(" ", "_")}.html'))
-        
+            fig.write_image(str(self.plot_dir / f'{title.replace(" ", "_")}.png'))
+
         fig.show()
     
     def plot_model_comparison_matrix(self, model_results: Dict[str, Dict[str, float]],
@@ -597,8 +597,8 @@ class ResultVisualizer:
         )
         
         if self.save_plots:
-            fig.write_html(str(self.plot_dir / "interactive_dashboard.html"))
-            print(f"交互式儀表板已保存至: {self.plot_dir / 'interactive_dashboard.html'}")
+            fig.write_image(str(self.plot_dir / "dashboard.png"))
+            print(f"儀表板圖表已保存至: {self.plot_dir / 'dashboard.png'}")
         
         fig.show()
     
@@ -625,7 +625,6 @@ class ResultVisualizer:
             "保存位置": str(self.plot_dir),
             "圖表統計": {
                 "靜態圖表": "PNG格式，300 DPI高解析度",
-                "交互式圖表": "HTML格式，支援縮放和懸停提示",
                 "數據摘要": "JSON格式，包含完整數值結果"
             }
         }

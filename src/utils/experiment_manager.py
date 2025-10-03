@@ -119,9 +119,9 @@ class ExperimentManager:
         
         self.hyperparameter_searcher = HyperparameterSearcher()
         self.experiment_results: List[ExperimentResult] = []
-        
-        # 載入已有的實驗結果
-        self.load_experiment_history()
+
+        # 不自動載入實驗歷史，每次都是全新實驗
+        # 如需載入歷史，可手動調用 self.load_experiment_history()
     
     def create_experiment_series(self, base_experiment_name: str,
                                param_space: Dict[str, List[Any]],
@@ -463,7 +463,7 @@ class ExperimentManager:
         result_file = self.results_dir / f"{experiment_name}.json"
         if result_file.exists():
             result_data = load_json(result_file)
-            return ExperimentResult(**result_data)
+            return self._create_experiment_result_from_data(result_data)
         
         return None
     
@@ -481,7 +481,46 @@ class ExperimentManager:
             'error_message': result.error_message
         }
         save_json(result_data, result_file)
-    
+
+    def _create_experiment_result_from_data(self, data: Dict[str, Any]) -> Optional[ExperimentResult]:
+        """從數據字典創建 ExperimentResult 實例，處理不同的數據格式"""
+        try:
+            # 處理包含 experiment_info 的格式
+            if 'experiment_info' in data:
+                experiment_name = data['experiment_info'].get('name', 'unknown_experiment')
+                # 使用默認值來填充缺失的字段
+                return ExperimentResult(
+                    experiment_name=experiment_name,
+                    config=data.get('config', {}),
+                    metrics=data.get('metrics', {}),
+                    start_time=data.get('start_time', ''),
+                    end_time=data.get('end_time', ''),
+                    duration=data.get('duration', 0.0),
+                    status=data.get('status', 'unknown'),
+                    error_message=data.get('error_message', None)
+                )
+
+            # 處理標準格式
+            elif 'experiment_name' in data:
+                return ExperimentResult(**data)
+
+            # 處理其他格式，嘗試推斷實驗名稱
+            else:
+                experiment_name = data.get('name', 'unknown_experiment')
+                return ExperimentResult(
+                    experiment_name=experiment_name,
+                    config=data.get('config', {}),
+                    metrics=data.get('metrics', {}),
+                    start_time=data.get('start_time', ''),
+                    end_time=data.get('end_time', ''),
+                    duration=data.get('duration', 0.0),
+                    status=data.get('status', 'unknown'),
+                    error_message=data.get('error_message', None)
+                )
+        except Exception as e:
+            print(f"無法從數據創建 ExperimentResult: {e}")
+            return None
+
     def load_experiment_history(self):
         """載入實驗歷史"""
         if not self.results_dir.exists():
@@ -494,8 +533,9 @@ class ExperimentManager:
                 
             try:
                 result_data = load_json(result_file)
-                result = ExperimentResult(**result_data)
-                self.experiment_results.append(result)
+                result = self._create_experiment_result_from_data(result_data)
+                if result:
+                    self.experiment_results.append(result)
             except Exception as e:
                 print(f"載入實驗結果失敗 {result_file}: {e}")
     

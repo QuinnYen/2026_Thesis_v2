@@ -197,10 +197,10 @@ class SemanticSpaceVisualizer:
             width=900,
             height=700
         )
-        
+
         if self.save_plots:
-            fig.write_html(str(self.plot_dir / f'{title.replace(" ", "_")}.html'))
-        
+            fig.write_image(str(self.plot_dir / f'{title.replace(" ", "_")}.png'))
+
         fig.show()
     
     def plot_aspect_clustering(self, embeddings: torch.Tensor,
@@ -341,10 +341,10 @@ class SemanticSpaceVisualizer:
             height=700,
             hovermode='closest'
         )
-        
+
         if self.save_plots:
-            fig.write_html(str(self.plot_dir / f'{title.replace(" ", "_")}.html'))
-        
+            fig.write_image(str(self.plot_dir / f'{title.replace(" ", "_")}.png'))
+
         fig.show()
         
         # 同時生成靜態版本
@@ -449,10 +449,10 @@ class SemanticSpaceVisualizer:
             width=900,
             height=700
         )
-        
+
         if self.save_plots:
-            fig.write_html(str(self.plot_dir / f'{title.replace(" ", "_")}.html'))
-        
+            fig.write_image(str(self.plot_dir / f'{title.replace(" ", "_")}.png'))
+
         fig.show()
     
     def plot_word_embedding_visualization(self, word_embeddings: Dict[str, torch.Tensor],
@@ -670,8 +670,8 @@ class SemanticSpaceVisualizer:
         )
         
         if self.save_plots:
-            fig.write_html(str(self.plot_dir / f'{title.replace(" ", "_")}.html'))
-            print(f"語義空間儀表板已保存至: {self.plot_dir / f'{title.replace(' ', '_')}.html'}")
+            fig.write_image(str(self.plot_dir / f'{title.replace(" ", "_")}.png'))
+            print(f"語義空間圖表已保存至: {self.plot_dir / f'{title.replace(' ', '_')}.png'}")
         
         fig.show()
     

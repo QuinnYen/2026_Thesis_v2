@@ -72,7 +72,6 @@ __all__ = [
     # 跨領域對齊相關
     'AbstractAspectDefinition',
     'CrossDomainAligner',
-    'AlignmentQualityEvaluator',
     
     # 數據轉換相關
     'AspectSentimentConverter',

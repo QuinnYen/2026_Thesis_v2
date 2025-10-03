@@ -922,6 +922,8 @@ class AttentionComparisonClassifier(BaseClassifier):
                 from src.attention.similarity_attention import CosineSimilarityAttention
                 from src.attention.keyword_guided_attention import KeywordWeightedAttention
                 from src.attention.attention_fusion import CrossAttentionFusion
+                from src.attention.regularized_attention import RegularizedAttention
+                from src.attention.constrained_attention import ConstrainedAttention
             except ImportError:
                 # 嘗試直接從attention包導入
                 from attention.self_attention import BasicSelfAttention, ScaledDotProductSelfAttention
@@ -980,6 +982,22 @@ class AttentionComparisonClassifier(BaseClassifier):
                 hidden_dim=self.hidden_dim,
                 **{k: v for k, v in self.attention_config.items() if k != 'attention_modules'}
             )
+        elif self.attention_type == 'regularized_attention':
+            # 正則化注意力
+            return RegularizedAttention(
+                hidden_dim=self.hidden_dim,
+                num_heads=self.attention_config.get('num_heads', 8),
+                dropout=self.dropout_rate,
+                regularization_config=self.attention_config.get('regularization_config', {})
+            )
+        elif self.attention_type == 'constrained_attention':
+            # 約束注意力
+            return ConstrainedAttention(
+                hidden_dim=self.hidden_dim,
+                num_heads=self.attention_config.get('num_heads', 8),
+                dropout=self.dropout_rate,
+                constraint_config=self.attention_config.get('constraint_config', {})
+            )
         else:
             # 默認使用基礎自注意力
             return BasicSelfAttention(hidden_dim=self.hidden_dim)
@@ -1003,40 +1021,60 @@ class AttentionComparisonClassifier(BaseClassifier):
             return True
         return False
     
-    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    def forward(self,
+                x: Union[torch.Tensor, Dict[str, torch.Tensor]],
+                semantic_features: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """
         前向傳播
-        
+
         Args:
             x: 輸入特徵或特徵字典
-            
+            semantic_features: 語義特徵（用於約束注意力）
+
         Returns:
             分類結果字典
         """
         # 處理輸入特徵
-        x = self._process_input_features(x)
-        
+        if isinstance(x, dict) and 'features' in x:
+            input_features = x['features']
+            # 如果字典中包含語義特徵，則使用它
+            if semantic_features is None and 'semantic_features' in x:
+                semantic_features = x['semantic_features']
+        else:
+            input_features = self._process_input_features(x)
+
         # 檢查輸入維度
-        actual_input_dim = x.size(-1)
+        actual_input_dim = input_features.size(-1)
         if actual_input_dim != self._expected_input_dim:
             self.reinitialize_for_input_dim(actual_input_dim)
-        
+
         # 如果是2D輸入，擴展為3D
-        if x.dim() == 2:
-            x = x.unsqueeze(1)  # [batch_size, 1, input_dim]
-        
-        batch_size, seq_len, _ = x.size()
-        
+        if input_features.dim() == 2:
+            input_features = input_features.unsqueeze(1)  # [batch_size, 1, input_dim]
+
+        batch_size, seq_len, _ = input_features.size()
+
         # 輸入投影
-        x = self.input_projection(x)  # [batch_size, seq_len, hidden_dim]
+        x = self.input_projection(input_features)  # [batch_size, seq_len, hidden_dim]
         
         # 應用注意力機制
         if hasattr(self.attention_layer, 'forward'):
             try:
+                # 對於約束注意力機制，需要額外的語義特徵參數
+                if self.attention_type == 'constrained_attention':
+                    attended_output = self.attention_layer(
+                        query=x, key=x, value=x,
+                        semantic_features=semantic_features
+                    )
+                # 對於正則化注意力機制
+                elif self.attention_type == 'regularized_attention':
+                    attended_output = self.attention_layer(
+                        query=x, key=x, value=x
+                    )
                 # 某些注意力機制需要query, key, value參數
-                if self.attention_type in ['cosine_similarity', 'keyword_guided'] or \
+                elif self.attention_type in ['cosine_similarity', 'keyword_guided'] or \
                    hasattr(self.attention_layer, '__module__') and \
-                   ('similarity_attention' in str(self.attention_layer.__module__) or 
+                   ('similarity_attention' in str(self.attention_layer.__module__) or
                     'keyword_guided_attention' in str(self.attention_layer.__module__)):
                     # 對於需要query, key, value的注意力機制，使用x作為所有三個參數
                     attended_output = self.attention_layer(query=x, key=x, value=x)
@@ -1089,8 +1127,67 @@ class AttentionComparisonClassifier(BaseClassifier):
         
         if attention_weights is not None:
             result['attention_weights'] = attention_weights
-        
+
+        # 添加正則化和約束損失資訊
+        if self.attention_type == 'regularized_attention' and hasattr(self.attention_layer, 'get_regularization_losses'):
+            regularization_losses = self.attention_layer.get_regularization_losses()
+            if regularization_losses:
+                result['regularization_losses'] = regularization_losses
+                result['total_regularization_loss'] = self.attention_layer.get_total_regularization_loss()
+
+        if self.attention_type == 'constrained_attention' and hasattr(self.attention_layer, 'get_constraint_info'):
+            constraint_info = self.attention_layer.get_constraint_info()
+            if constraint_info:
+                result['constraint_info'] = constraint_info
+
         return result
+
+    def get_attention_analysis(self) -> Dict[str, Any]:
+        """
+        獲取注意力機制的詳細分析
+
+        Returns:
+            注意力分析結果
+        """
+        analysis = {
+            'attention_type': self.attention_type,
+            'hidden_dim': self.hidden_dim
+        }
+
+        if hasattr(self.attention_layer, 'attention_weights') and self.attention_layer.attention_weights is not None:
+            weights = self.attention_layer.attention_weights
+
+            # 基本統計
+            analysis['attention_stats'] = {
+                'mean': weights.mean().item(),
+                'std': weights.std().item(),
+                'max': weights.max().item(),
+                'min': weights.min().item()
+            }
+
+            # 熵計算
+            with torch.no_grad():
+                eps = 1e-8
+                weights_safe = weights + eps
+                entropy = -torch.sum(weights_safe * torch.log(weights_safe), dim=-1)
+                analysis['attention_entropy'] = {
+                    'mean': entropy.mean().item(),
+                    'std': entropy.std().item()
+                }
+
+        # 正則化注意力的特殊資訊
+        if self.attention_type == 'regularized_attention':
+            if hasattr(self.attention_layer, 'get_regularization_losses'):
+                analysis['regularization_losses'] = self.attention_layer.get_regularization_losses()
+            if hasattr(self.attention_layer, 'get_attention_statistics'):
+                analysis['attention_statistics'] = self.attention_layer.get_attention_statistics()
+
+        # 約束注意力的特殊資訊
+        if self.attention_type == 'constrained_attention':
+            if hasattr(self.attention_layer, 'get_constraint_info'):
+                analysis['constraint_info'] = self.attention_layer.get_constraint_info()
+
+        return analysis
 
 
 class EnsembleClassifier(nn.Module):

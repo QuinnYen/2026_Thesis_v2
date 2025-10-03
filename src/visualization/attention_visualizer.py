@@ -376,7 +376,7 @@ class AttentionVisualizer:
         )
         
         if self.save_plots:
-            fig.write_html(str(self.plot_dir / f'{title.replace(" ", "_")}.html'))
+            fig.write_image(str(self.plot_dir / f'{title.replace(" ", "_")}.png'))
         
         fig.show()
     
@@ -604,8 +604,8 @@ class AttentionVisualizer:
         )
         
         if self.save_plots:
-            fig.write_html(str(self.plot_dir / f'{title.replace(" ", "_")}.html'))
-            print(f"注意力儀表板已保存至: {self.plot_dir / f'{title.replace(' ', '_')}.html'}")
+            fig.write_image(str(self.plot_dir / f'{title.replace(" ", "_")}.png'))
+            print(f"注意力圖表已保存至: {self.plot_dir / f'{title.replace(' ', '_')}.png'}")
         
         fig.show()
     
@@ -721,3 +721,566 @@ class AttentionVisualizer:
                 json.dump(report, f, ensure_ascii=False, indent=2, default=str)
         
         return report
+
+    def create_attention_quality_assessment_chart(self,
+                                                 attention_weights: torch.Tensor,
+                                                 analysis_results: Dict[str, Any],
+                                                 title: str = "注意力質量評估",
+                                                 save_path: Optional[Path] = None) -> go.Figure:
+        """
+        創建注意力質量評估圖表
+
+        Args:
+            attention_weights: 注意力權重張量
+            analysis_results: 分析結果
+            title: 圖表標題
+            save_path: 保存路徑
+
+        Returns:
+            plotly圖表對象
+        """
+        # 創建子圖
+        fig = make_subplots(
+            rows=2, cols=3,
+            subplot_titles=(
+                "聚焦度分析", "熵分佈", "異常檢測",
+                "頭間相似性", "位置偏差", "質量綜合評分"
+            ),
+            specs=[
+                [{"type": "bar"}, {"type": "histogram"}, {"type": "scatter"}],
+                [{"type": "heatmap"}, {"type": "bar"}, {"type": "indicator"}]
+            ]
+        )
+
+        # 1. 聚焦度分析
+        focus_analysis = analysis_results.get('focus_analysis', {})
+        head_focus_scores = focus_analysis.get('head_focus_scores', [])
+
+        if head_focus_scores:
+            fig.add_trace(
+                go.Bar(
+                    x=list(range(len(head_focus_scores))),
+                    y=head_focus_scores,
+                    name="聚焦分數",
+                    marker_color='steelblue'
+                ),
+                row=1, col=1
+            )
+
+        # 2. 熵分佈
+        entropy_analysis = analysis_results.get('entropy_analysis', {})
+        head_entropies = entropy_analysis.get('head_normalized_entropies', [])
+
+        if head_entropies:
+            fig.add_trace(
+                go.Histogram(
+                    x=head_entropies,
+                    nbinsx=10,
+                    name="熵分佈",
+                    marker_color='orange'
+                ),
+                row=1, col=2
+            )
+
+        # 3. 異常檢測
+        anomaly_detection = analysis_results.get('anomaly_detection', {})
+        extreme_weights = anomaly_detection.get('extreme_weights', {})
+
+        if extreme_weights:
+            fig.add_trace(
+                go.Scatter(
+                    x=['極端高權重', '極端低權重'],
+                    y=[extreme_weights.get('extreme_high_ratio', 0),
+                       extreme_weights.get('extreme_low_ratio', 0)],
+                    mode='markers',
+                    marker=dict(size=15, color='red'),
+                    name="異常比例"
+                ),
+                row=1, col=3
+            )
+
+        # 4. 頭間相似性熱力圖
+        head_similarity = anomaly_detection.get('head_similarity_anomalies', {})
+        similarity_matrix = head_similarity.get('similarity_matrix', [])
+
+        if similarity_matrix:
+            fig.add_trace(
+                go.Heatmap(
+                    z=similarity_matrix,
+                    colorscale='RdYlBu',
+                    name="頭間相似性"
+                ),
+                row=2, col=1
+            )
+
+        # 5. 位置偏差
+        position_bias = anomaly_detection.get('position_bias', {})
+        head_position_bias = position_bias.get('head_position_bias_scores', [])
+
+        if head_position_bias:
+            fig.add_trace(
+                go.Bar(
+                    x=list(range(len(head_position_bias))),
+                    y=head_position_bias,
+                    name="位置偏差",
+                    marker_color='green'
+                ),
+                row=2, col=2
+            )
+
+        # 6. 質量綜合評分
+        quality_score = self._calculate_attention_quality_score(analysis_results)
+
+        fig.add_trace(
+            go.Indicator(
+                mode="gauge+number+delta",
+                value=quality_score,
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': "質量分數"},
+                gauge={
+                    'axis': {'range': [None, 100]},
+                    'bar': {'color': "darkblue"},
+                    'steps': [
+                        {'range': [0, 50], 'color': "lightgray"},
+                        {'range': [50, 80], 'color': "yellow"},
+                        {'range': [80, 100], 'color': "green"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 90
+                    }
+                }
+            ),
+            row=2, col=3
+        )
+
+        fig.update_layout(
+            title=title,
+            height=800,
+            showlegend=False
+        )
+
+        if save_path and self.save_plots:
+            # 將 .html 擴展名替換為 .png
+            png_path = save_path.replace('.html', '.png') if isinstance(save_path, str) else str(save_path).replace('.html', '.png')
+            fig.write_image(png_path)
+
+        return fig
+
+    def _calculate_attention_quality_score(self, analysis_results: Dict[str, Any]) -> float:
+        """計算注意力質量綜合評分"""
+        score = 0.0
+        max_score = 100.0
+
+        # 聚焦度分數 (25分)
+        focus_analysis = analysis_results.get('focus_analysis', {})
+        focus_score = focus_analysis.get('overall_focus_score', 0)
+        score += min(25, focus_score * 100)
+
+        # 熵合理性 (25分)
+        entropy_analysis = analysis_results.get('entropy_analysis', {})
+        normalized_entropy = entropy_analysis.get('overall_normalized_entropy', 0)
+        # 適中的熵值得分更高（0.4-0.7範圍）
+        if 0.4 <= normalized_entropy <= 0.7:
+            score += 25
+        elif 0.2 <= normalized_entropy < 0.4 or 0.7 < normalized_entropy <= 0.8:
+            score += 15
+        else:
+            score += 5
+
+        # 異常度 (25分) - 異常越少得分越高
+        anomaly_detection = analysis_results.get('anomaly_detection', {})
+        extreme_weights = anomaly_detection.get('extreme_weights', {})
+        extreme_ratio = extreme_weights.get('extreme_high_ratio', 0) + extreme_weights.get('extreme_low_ratio', 0)
+        score += max(0, 25 - extreme_ratio * 500)  # 假設極端比例通常很小
+
+        # 頭多樣性 (25分)
+        head_comparison = analysis_results.get('head_comparison', {})
+        diversity_metrics = head_comparison.get('diversity_metrics', {})
+        diversity_score = diversity_metrics.get('diversity_score', 0)
+        score += diversity_score * 25
+
+        return min(max_score, max(0, score))
+
+    def create_multi_head_comparison_chart(self,
+                                         attention_weights: torch.Tensor,
+                                         head_names: Optional[List[str]] = None,
+                                         title: str = "多頭注意力比較",
+                                         save_path: Optional[Path] = None) -> go.Figure:
+        """
+        創建多頭注意力比較圖
+
+        Args:
+            attention_weights: 注意力權重張量 [batch_size, num_heads, seq_len, seq_len]
+            head_names: 頭名稱列表
+            title: 圖表標題
+            save_path: 保存路徑
+
+        Returns:
+            plotly圖表對象
+        """
+        with torch.no_grad():
+            weights = attention_weights.detach().cpu()
+            batch_size, num_heads, seq_len, _ = weights.shape
+
+            if head_names is None:
+                head_names = [f"Head {i+1}" for i in range(num_heads)]
+
+            # 創建子圖網格
+            cols = min(4, num_heads)
+            rows = (num_heads + cols - 1) // cols
+
+            fig = make_subplots(
+                rows=rows, cols=cols,
+                subplot_titles=head_names,
+                specs=[[{"type": "heatmap"} for _ in range(cols)] for _ in range(rows)]
+            )
+
+            # 為每個頭創建熱力圖
+            for head_idx in range(num_heads):
+                row = head_idx // cols + 1
+                col = head_idx % cols + 1
+
+                # 計算該頭的平均注意力權重
+                head_weights = weights[:, head_idx, :, :].mean(dim=0)
+
+                fig.add_trace(
+                    go.Heatmap(
+                        z=head_weights.numpy(),
+                        colorscale='Blues',
+                        showscale=(head_idx == 0),  # 只在第一個圖顯示色標
+                        name=head_names[head_idx]
+                    ),
+                    row=row, col=col
+                )
+
+            fig.update_layout(
+                title=title,
+                height=200 * rows,
+                showlegend=False
+            )
+
+            if save_path and self.save_plots:
+                # 將 .html 擴展名替換為 .png
+                png_path = save_path.replace('.html', '.png') if isinstance(save_path, str) else str(save_path).replace('.html', '.png')
+                fig.write_image(png_path)
+
+            return fig
+
+    def create_head_statistics_comparison(self,
+                                        attention_weights: torch.Tensor,
+                                        analysis_results: Dict[str, Any],
+                                        title: str = "注意力頭統計比較",
+                                        save_path: Optional[Path] = None) -> go.Figure:
+        """
+        創建注意力頭統計特性比較圖
+
+        Args:
+            attention_weights: 注意力權重張量
+            analysis_results: 分析結果
+            title: 圖表標題
+            save_path: 保存路徑
+
+        Returns:
+            plotly圖表對象
+        """
+        num_heads = attention_weights.shape[1]
+
+        # 創建雷達圖比較各頭特性
+        fig = go.Figure()
+
+        # 提取各頭的統計特性
+        focus_scores = analysis_results.get('focus_analysis', {}).get('head_focus_scores', [])
+        entropies = analysis_results.get('entropy_analysis', {}).get('head_normalized_entropies', [])
+        concentration_ratios = analysis_results.get('focus_analysis', {}).get('head_concentration_ratios', [])
+        effective_ranges = analysis_results.get('focus_analysis', {}).get('head_effective_ranges', [])
+
+        # 選擇幾個代表性的頭進行比較
+        selected_heads = list(range(0, min(6, num_heads), max(1, num_heads // 6)))
+
+        for head_idx in selected_heads:
+            # 構建該頭的特徵向量
+            features = [
+                focus_scores[head_idx] if head_idx < len(focus_scores) else 0,
+                1 - entropies[head_idx] if head_idx < len(entropies) else 0,  # 反轉熵值
+                concentration_ratios[head_idx] if head_idx < len(concentration_ratios) else 0,
+                effective_ranges[head_idx] if head_idx < len(effective_ranges) else 0
+            ]
+
+            fig.add_trace(go.Scatterpolar(
+                r=features,
+                theta=['聚焦度', '確定性', '集中度', '有效範圍'],
+                fill='toself',
+                name=f'Head {head_idx + 1}'
+            ))
+
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, 1]
+                )),
+            showlegend=True,
+            title=title
+        )
+
+        if save_path and self.save_plots:
+            # 將 .html 擴展名替換為 .png
+            png_path = save_path.replace('.html', '.png') if isinstance(save_path, str) else str(save_path).replace('.html', '.png')
+            fig.write_image(png_path)
+
+        return fig
+
+    def create_attention_token_correspondence_chart(self,
+                                                  attention_weights: torch.Tensor,
+                                                  tokens: List[str],
+                                                  analysis_results: Dict[str, Any],
+                                                  title: str = "注意力-詞彙對應關係",
+                                                  save_path: Optional[Path] = None) -> go.Figure:
+        """
+        創建注意力-詞彙對應關係圖
+
+        Args:
+            attention_weights: 注意力權重張量
+            tokens: 詞彙列表
+            analysis_results: 分析結果
+            title: 圖表標題
+            save_path: 保存路徑
+
+        Returns:
+            plotly圖表對象
+        """
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                "詞彙注意力分數", "重要詞彙分佈",
+                "詞彙關聯網絡", "注意力流向"
+            ),
+            specs=[
+                [{"type": "bar"}, {"type": "scatter"}],
+                [{"type": "scatter"}, {"type": "heatmap"}]
+            ]
+        )
+
+        token_analysis = analysis_results.get('token_analysis', {})
+
+        # 1. 詞彙注意力分數
+        token_scores = token_analysis.get('token_scores', {})
+        if token_scores:
+            top_tokens = token_analysis.get('token_scores', {}).get('top_tokens_by_attention', [])[:15]
+
+            if top_tokens:
+                tokens_list = [item[0] for item in top_tokens]
+                scores_list = [item[1]['total_attention'] for item in top_tokens]
+
+                fig.add_trace(
+                    go.Bar(
+                        x=tokens_list,
+                        y=scores_list,
+                        name="注意力分數",
+                        marker_color='steelblue'
+                    ),
+                    row=1, col=1
+                )
+
+        # 2. 重要詞彙分佈
+        important_tokens = token_analysis.get('important_tokens', {})
+        important_list = important_tokens.get('important_tokens', [])
+
+        if important_list:
+            positions = [token['position'] for token in important_list]
+            scores = [token['attention_score'] for token in important_list]
+            token_names = [token['token'] for token in important_list]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=positions,
+                    y=scores,
+                    mode='markers+text',
+                    text=token_names,
+                    textposition="top center",
+                    marker=dict(
+                        size=10,
+                        color=scores,
+                        colorscale='Reds',
+                        showscale=True
+                    ),
+                    name="重要詞彙"
+                ),
+                row=1, col=2
+            )
+
+        # 3. 詞彙關聯網絡 (簡化為散點圖)
+        token_associations = token_analysis.get('token_associations', {})
+        top_associations = token_associations.get('top_associations', [])[:10]
+
+        if top_associations:
+            from_positions = [assoc['from_position'] for assoc in top_associations]
+            to_positions = [assoc['to_position'] for assoc in top_associations]
+            weights_list = [assoc['attention_weight'] for assoc in top_associations]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=from_positions,
+                    y=to_positions,
+                    mode='markers',
+                    marker=dict(
+                        size=[w*50 for w in weights_list],
+                        color=weights_list,
+                        colorscale='Viridis',
+                        opacity=0.7
+                    ),
+                    name="詞彙關聯"
+                ),
+                row=2, col=1
+            )
+
+        # 4. 注意力流向熱力圖
+        with torch.no_grad():
+            weights = attention_weights.detach().cpu()
+            avg_attention = weights.mean(dim=(0, 1))  # [seq_len, seq_len]
+
+            # 如果序列太長，進行下採樣
+            if len(tokens) > 20:
+                step = len(tokens) // 20
+                sampled_indices = list(range(0, len(tokens), step))
+                sampled_attention = avg_attention[sampled_indices][:, sampled_indices]
+                sampled_tokens = [tokens[i] for i in sampled_indices]
+            else:
+                sampled_attention = avg_attention
+                sampled_tokens = tokens
+
+            fig.add_trace(
+                go.Heatmap(
+                    z=sampled_attention.numpy(),
+                    x=sampled_tokens,
+                    y=sampled_tokens,
+                    colorscale='Blues',
+                    name="注意力流向"
+                ),
+                row=2, col=2
+            )
+
+        fig.update_layout(
+            title=title,
+            height=800,
+            showlegend=True
+        )
+
+        # 更新x軸標籤旋轉
+        fig.update_xaxes(tickangle=45, row=1, col=1)
+        fig.update_xaxes(tickangle=45, row=2, col=2)
+        fig.update_yaxes(tickangle=45, row=2, col=2)
+
+        if save_path and self.save_plots:
+            # 將 .html 擴展名替換為 .png
+            png_path = save_path.replace('.html', '.png') if isinstance(save_path, str) else str(save_path).replace('.html', '.png')
+            fig.write_image(png_path)
+
+        return fig
+
+    def create_attention_anomaly_detection_chart(self,
+                                               attention_weights: torch.Tensor,
+                                               analysis_results: Dict[str, Any],
+                                               title: str = "注意力異常檢測",
+                                               save_path: Optional[Path] = None) -> go.Figure:
+        """
+        創建注意力異常檢測圖表
+
+        Args:
+            attention_weights: 注意力權重張量
+            analysis_results: 分析結果
+            title: 圖表標題
+            save_path: 保存路徑
+
+        Returns:
+            plotly圖表對象
+        """
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                "極端權重分佈", "頭間相似性分析",
+                "位置偏差檢測", "均勻性偏離度"
+            )
+        )
+
+        anomaly_detection = analysis_results.get('anomaly_detection', {})
+
+        # 1. 極端權重分佈
+        extreme_weights = anomaly_detection.get('extreme_weights', {})
+        if extreme_weights:
+            categories = ['極端高權重', '正常權重', '極端低權重']
+            values = [
+                extreme_weights.get('extreme_high_ratio', 0),
+                1 - extreme_weights.get('extreme_high_ratio', 0) - extreme_weights.get('extreme_low_ratio', 0),
+                extreme_weights.get('extreme_low_ratio', 0)
+            ]
+
+            fig.add_trace(
+                go.Bar(
+                    x=categories,
+                    y=values,
+                    marker_color=['red', 'green', 'blue'],
+                    name="權重分佈"
+                ),
+                row=1, col=1
+            )
+
+        # 2. 頭間相似性分析
+        head_similarity = anomaly_detection.get('head_similarity_anomalies', {})
+        similarity_matrix = head_similarity.get('similarity_matrix', [])
+
+        if similarity_matrix:
+            fig.add_trace(
+                go.Heatmap(
+                    z=similarity_matrix,
+                    colorscale='RdYlBu_r',
+                    name="相似性矩陣"
+                ),
+                row=1, col=2
+            )
+
+        # 3. 位置偏差檢測
+        position_bias = anomaly_detection.get('position_bias', {})
+        head_position_bias = position_bias.get('head_position_bias_scores', [])
+
+        if head_position_bias:
+            fig.add_trace(
+                go.Scatter(
+                    x=list(range(len(head_position_bias))),
+                    y=head_position_bias,
+                    mode='lines+markers',
+                    name="位置偏差",
+                    line=dict(color='orange')
+                ),
+                row=2, col=1
+            )
+
+        # 4. 均勻性偏離度
+        uniformity_analysis = anomaly_detection.get('uniformity_analysis', {})
+        head_uniformity_scores = uniformity_analysis.get('head_uniformity_scores', [])
+
+        if head_uniformity_scores:
+            fig.add_trace(
+                go.Bar(
+                    x=list(range(len(head_uniformity_scores))),
+                    y=head_uniformity_scores,
+                    name="KL散度",
+                    marker_color='purple'
+                ),
+                row=2, col=2
+            )
+
+        fig.update_layout(
+            title=title,
+            height=700,
+            showlegend=True
+        )
+
+        if save_path and self.save_plots:
+            # 將 .html 擴展名替換為 .png
+            png_path = save_path.replace('.html', '.png') if isinstance(save_path, str) else str(save_path).replace('.html', '.png')
+            fig.write_image(png_path)
+
+        return fig
